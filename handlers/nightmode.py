@@ -160,7 +160,8 @@ async def nightmode_loop(client: Client):
                             pass
                         print(f"[NIGHTMODE] Closed chat={chat_id}")
                     except Exception as e:
-                        print(f"[NIGHTMODE] Could not restrict {chat_id}: {e}")
+                        if "CHAT_NOT_MODIFIED" not in str(e):
+                            print(f"[NIGHTMODE] Could not restrict {chat_id}: {e}")
 
                 elif not is_night_time and current_perms_restricted:
                     try:

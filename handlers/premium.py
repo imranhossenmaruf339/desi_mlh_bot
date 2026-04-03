@@ -184,11 +184,18 @@ async def pkg_back(_, cq: CallbackQuery):
 
 @app.on_callback_query(filters.regex("^open_buypremium$"))
 async def open_buypremium(_, cq: CallbackQuery):
-    await cq.message.delete()
     await cq.answer()
-    fake = cq.message
-    fake.from_user = cq.from_user
-    await buypremium_cmd(_, cq.message)
+    text = (
+        "<b>💎 Premium প্যাকেজ বেছে নিন</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    for pkg in PACKAGES.values():
+        text += (
+            f"{pkg['label']}  •  <b>{pkg['price']}</b>\n"
+            f"   └ {pkg['desc']}\n\n"
+        )
+    text += "━━━━━━━━━━━━━━━━━━━\nএকটি প্যাকেজ বেছে নিন 👇"
+    await cq.message.edit_text(text, parse_mode=HTML, reply_markup=_packages_keyboard())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
