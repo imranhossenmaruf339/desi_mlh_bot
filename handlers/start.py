@@ -203,8 +203,6 @@ async def start_handler(client: Client, message: Message):
         ],
         [
             InlineKeyboardButton("💎 Buy Premium ✨", url=_premium_url),
-        ],
-        [
             InlineKeyboardButton("📤 Share Bot",
                                  url=f"https://t.me/share/url?url=https://t.me/{bot_username}"
                                      f"&text=Join%20this%20awesome%20bot%20%F0%9F%8E%AC"),
