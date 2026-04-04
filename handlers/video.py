@@ -68,7 +68,7 @@ async def _send_video_to_user(client: Client, user_id: int) -> str:
     seen_ids  = {d["message_id"] async for d in seen_docs}
 
     all_docs  = await videos_col.find({}).to_list(length=None)
-    pool      = [d["message_id"] for d in all_docs if d["message_id"] not in seen_ids]
+    pool      = [d for d in all_docs if d["message_id"] not in seen_ids]
 
     if not all_docs:
         return (
@@ -92,7 +92,9 @@ async def _send_video_to_user(client: Client, user_id: int) -> str:
             "🤖 DESI MLH SYSTEM"
         )
 
-    msg_id = random.choice(pool)
+    chosen    = random.choice(pool)
+    msg_id    = chosen["message_id"]
+    file_id   = chosen.get("file_id")
     used   = vid_count + 1
     if is_unlimited:
         usage_line = f"📹 Today: {used}  |  Limit: ♾️ Unlimited"
@@ -109,21 +111,48 @@ async def _send_video_to_user(client: Client, user_id: int) -> str:
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             "🤖 DESI MLH SYSTEM"
         )
-        resp = await bot_api("copyMessage", {
-            "chat_id":         user_id,
-            "from_chat_id":    VIDEO_CHANNEL,
-            "message_id":      msg_id,
-            "caption":         caption,
-            "has_spoiler":     True,
-            "protect_content": True,
-        })
+
+        # Prefer sendVideo (guaranteed spoiler) over copyMessage (spoiler not reliable)
+        if file_id:
+            resp = await bot_api("sendVideo", {
+                "chat_id":          user_id,
+                "video":            file_id,
+                "caption":          caption,
+                "parse_mode":       "HTML",
+                "has_spoiler":      True,
+                "protect_content":  True,
+                "supports_streaming": True,
+            })
+        else:
+            resp = await bot_api("copyMessage", {
+                "chat_id":         user_id,
+                "from_chat_id":    VIDEO_CHANNEL,
+                "message_id":      msg_id,
+                "caption":         caption,
+                "has_spoiler":     True,
+                "protect_content": True,
+            })
+
         if not resp.get("ok"):
             err_desc = resp.get("description", "")
-            print(f"[VIDEO] copyMessage failed: {err_desc}")
-            if "not found" in err_desc.lower() or "invalid" in err_desc.lower():
-                await videos_col.delete_one({"message_id": msg_id})
-                print(f"[VIDEO] msg={msg_id} not found, removed from DB")
-            return "❌ Could not send the video. Please try again."
+            print(f"[VIDEO] send failed (file_id={'yes' if file_id else 'no'}): {err_desc}")
+            # If file_id is stale, fall back to copyMessage
+            if file_id and ("file" in err_desc.lower() or "invalid" in err_desc.lower()):
+                await videos_col.update_one({"message_id": msg_id}, {"$unset": {"file_id": ""}})
+                resp = await bot_api("copyMessage", {
+                    "chat_id":         user_id,
+                    "from_chat_id":    VIDEO_CHANNEL,
+                    "message_id":      msg_id,
+                    "caption":         caption,
+                    "has_spoiler":     True,
+                    "protect_content": True,
+                })
+            if not resp.get("ok"):
+                err_desc2 = resp.get("description", "")
+                if "not found" in err_desc2.lower() or "invalid" in err_desc2.lower():
+                    await videos_col.delete_one({"message_id": msg_id})
+                    print(f"[VIDEO] msg={msg_id} not found, removed from DB")
+                return "❌ Could not send the video. Please try again."
         sent_msg_id = resp.get("result", {}).get("message_id")
         if sent_msg_id:
             async def _del_video(mid=sent_msg_id, uid=user_id):
@@ -222,13 +251,19 @@ async def channel_post_handler(client: Client, message: Message):
         return
     if not message.video:
         return
+    file_id = message.video.file_id if message.video else None
     exists = await videos_col.find_one({"message_id": message.id})
     if not exists:
         await videos_col.insert_one({
             "channel_id": VIDEO_CHANNEL,
             "message_id": message.id,
+            "file_id":    file_id,
             "added_at":   datetime.utcnow(),
         })
+    elif file_id and not exists.get("file_id"):
+        await videos_col.update_one(
+            {"message_id": message.id}, {"$set": {"file_id": file_id}}
+        )
     total = await videos_col.count_documents({})
     print(f"[VIDEO] Auto-saved new video msg={message.id}  total={total}")
     asyncio.create_task(log_event(client,
@@ -251,13 +286,19 @@ async def admin_forward_video(client: Client, message: Message):
     fwd_id   = getattr(message, "forward_from_message_id", None)
     if not fwd_chat or fwd_chat.id != VIDEO_CHANNEL or not fwd_id:
         return
+    file_id = message.video.file_id if message.video else None
     exists = await videos_col.find_one({"message_id": fwd_id})
     if not exists:
         await videos_col.insert_one({
             "channel_id": VIDEO_CHANNEL,
             "message_id": fwd_id,
+            "file_id":    file_id,
             "added_at":   datetime.utcnow(),
         })
+    elif file_id and not exists.get("file_id"):
+        await videos_col.update_one(
+            {"message_id": fwd_id}, {"$set": {"file_id": file_id}}
+        )
     total = await videos_col.count_documents({})
     await message.reply_text(
         f"✅ Video saved!\n📦 Total in library: {total}"
@@ -273,6 +314,70 @@ async def admin_forward_video(client: Client, message: Message):
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🤖 DESI MLH SYSTEM"
     ))
+
+
+@app.on_message(filters.command("syncvideos") & filters.user(ADMIN_ID) & filters.private)
+async def syncvideos_cmd(client: Client, message: Message):
+    """Backfill file_ids for all videos in DB that don't have one yet."""
+    docs = await videos_col.find({"file_id": {"$exists": False}}).to_list(length=None)
+    if not docs:
+        await message.reply_text("✅ All videos already have file_id stored. No sync needed.")
+        return
+
+    total   = len(docs)
+    ok_cnt  = 0
+    fail_cnt = 0
+    status = await message.reply_text(
+        f"🔄 <b>Syncing {total} videos...</b>\n"
+        f"This may take a minute. Please wait.",
+        parse_mode=HTML,
+    )
+
+    for i, doc in enumerate(docs, 1):
+        msg_id = doc["message_id"]
+        try:
+            fwd = await bot_api("forwardMessage", {
+                "chat_id":      ADMIN_ID,
+                "from_chat_id": VIDEO_CHANNEL,
+                "message_id":   msg_id,
+            })
+            if fwd.get("ok"):
+                result   = fwd.get("result", {})
+                video    = result.get("video")
+                fwd_mid  = result.get("message_id")
+                fid      = (video or {}).get("file_id")
+                if fid:
+                    await videos_col.update_one(
+                        {"message_id": msg_id}, {"$set": {"file_id": fid}}
+                    )
+                    ok_cnt += 1
+                else:
+                    fail_cnt += 1
+                if fwd_mid:
+                    await bot_api("deleteMessage", {
+                        "chat_id": ADMIN_ID, "message_id": fwd_mid
+                    })
+            else:
+                desc = fwd.get("description", "")
+                if "not found" in desc.lower() or "message to forward not found" in desc.lower():
+                    await videos_col.delete_one({"message_id": msg_id})
+                    print(f"[SYNC] msg={msg_id} missing in channel, removed from DB")
+                fail_cnt += 1
+        except Exception as e:
+            print(f"[SYNC] Error for msg={msg_id}: {e}")
+            fail_cnt += 1
+        await asyncio.sleep(0.3)  # avoid flood
+
+    await status.edit_text(
+        f"✅ <b>Sync Complete</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📹 Total checked : <b>{total}</b>\n"
+        f"✅ file_id saved : <b>{ok_cnt}</b>\n"
+        f"❌ Failed/missing: <b>{fail_cnt}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 DESI MLH SYSTEM",
+        parse_mode=HTML,
+    )
 
 
 @app.on_message(filters.command("listvideos") & filters.user(ADMIN_ID) & filters.private)
