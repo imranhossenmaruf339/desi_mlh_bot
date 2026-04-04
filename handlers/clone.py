@@ -1,11 +1,18 @@
 import asyncio
 from datetime import datetime
 
-from pyrogram import Client, filters, StopPropagation
+from pyrogram import Client, filters, StopPropagation, ContinuePropagation
 from pyrogram.types import Message
 
 from config import HTML, ADMIN_ID, clones_col, app
 from helpers import _auto_del, log_event, get_cfg, _clone_config_ctx
+
+def _get_cfg_from_client(client, key, fallback=None):
+    """Get clone config value from client attribute (reliable) or ContextVar (fallback)."""
+    cfg = getattr(client, "_clone_config", None) or _clone_config_ctx.get()
+    if cfg and cfg.get(key) is not None:
+        return cfg[key]
+    return fallback
 
 # ── In-memory setup wizard sessions ──────────────────────────────────────────
 # Key: (token, admin_id) → {"step": "log_group"|"video_channel"|"inbox_group"}
@@ -62,6 +69,11 @@ def _next_step(current: str) -> str | None:
 def _get_clone_client(token: str):
     from clone_manager import get_active_clones
     return get_active_clones().get(token)
+
+
+def _get_clone_cfg(client) -> dict | None:
+    """Get clone config from client attribute (reliable) or ContextVar (fallback)."""
+    return getattr(client, "_clone_config", None) or _clone_config_ctx.get()
 
 
 def _check_clone_admin(cfg: dict, uid: int) -> bool:
@@ -123,22 +135,22 @@ async def _finish_setup(clone_client, cfg: dict, admin_id: int):
 
 @app.on_message(filters.private & filters.incoming, group=-1)
 async def clone_setup_handler(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
-        return  # Not in clone context
+        raise ContinuePropagation  # Not in clone context — let next handler try
 
     if not message.from_user:
-        return
+        raise ContinuePropagation
 
     uid = message.from_user.id
     if not _check_clone_admin(cfg, uid):
-        return
+        raise ContinuePropagation  # Not this clone's admin
 
     tok = cfg.get("token")
     key = _setup_key(tok, uid)
     session = _setup_sessions.get(key)
     if not session:
-        return  # No active setup wizard
+        raise ContinuePropagation  # No active setup wizard — let command handlers run
 
     step  = session.get("step")
     text  = (message.text or "").strip()
@@ -220,14 +232,14 @@ async def clone_setup_handler(client: Client, message: Message):
 
 @app.on_message(filters.command("help") & filters.private, group=-1)
 async def clone_help_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
-        return  # Let main bot /help handle it
+        raise ContinuePropagation  # Not clone context — main bot handles /help
 
     if not message.from_user:
-        return
+        raise ContinuePropagation
     if not _check_clone_admin(cfg, message.from_user.id):
-        return
+        raise ContinuePropagation
 
     name = cfg.get("name", "Clone Bot")
     await message.reply_text(
@@ -263,9 +275,9 @@ async def clone_help_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("cloneconfig") & filters.private)
 async def cloneconfig_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
-        return  # Silently ignore on main bot
+        return
 
     uid = message.from_user.id if message.from_user else 0
     if not _check_clone_admin(cfg, uid):
@@ -300,7 +312,7 @@ async def cloneconfig_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("setupclone") & filters.private)
 async def restart_setup_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
         return
 
@@ -324,7 +336,7 @@ async def restart_setup_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("setvideochannel") & filters.private)
 async def set_video_channel_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
         return
 
@@ -371,7 +383,7 @@ async def set_video_channel_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("setcloneinbox"))
 async def set_clone_inbox_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
         return
 
@@ -437,7 +449,7 @@ async def set_clone_inbox_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("setclonelog"))
 async def set_clone_log_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
         return
 
@@ -502,17 +514,17 @@ async def set_clone_log_cmd(client: Client, message: Message):
 
 @app.on_message(filters.private & filters.forwarded & filters.incoming, group=-1)
 async def forward_detect_channel(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
+    cfg = _get_clone_cfg(client)
     if not cfg:
-        return
+        raise ContinuePropagation
 
     uid = message.from_user.id if message.from_user else 0
     if not _check_clone_admin(cfg, uid):
-        return
+        raise ContinuePropagation
 
     fwd = message.forward_from_chat
     if not fwd or not hasattr(fwd, "type") or fwd.type.value != "channel":
-        return
+        raise ContinuePropagation
 
     tok   = cfg.get("token")
     ch_id = fwd.id
