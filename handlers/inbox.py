@@ -232,19 +232,12 @@ async def inbox_group_reply(client: Client, message: Message):
         target_user_id = mapping["user_id"]
         target_name    = mapping.get("user_name", str(target_user_id))
 
-        # send header to user
-        await bot_api("sendMessage", {
-            "chat_id":    target_user_id,
-            "text":       "📩 <b>Admin Reply</b>\n━━━━━━━━━━━━━━━━━━━━━━",
-            "parse_mode": "HTML",
-        })
-
-        # send the actual content
+        # send only the message content — no header or footer
         ok = False
         if message.text:
             r = await bot_api("sendMessage", {
-                "chat_id":    target_user_id,
-                "text":       message.text,
+                "chat_id": target_user_id,
+                "text":    message.text,
             })
             ok = r.get("ok", False)
         elif message.photo:
@@ -288,16 +281,11 @@ async def inbox_group_reply(client: Client, message: Message):
             })
             ok = r.get("ok", False)
         else:
-            await bot_api("sendMessage", {
+            r = await bot_api("sendMessage", {
                 "chat_id": target_user_id,
                 "text":    "📎 (Unsupported message type)",
             })
-            ok = True
-
-        await bot_api("sendMessage", {
-            "chat_id": target_user_id,
-            "text":    "━━━━━━━━━━━━━━━━━━━━━━\n🤖 DESI MLH SYSTEM",
-        })
+            ok = r.get("ok", False)
 
         if ok:
             await message.reply_text(
