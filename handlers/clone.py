@@ -710,3 +710,33 @@ async def clones_list_cmd(client: Client, message: Message):
         )
     lines.append(f"━━━━━━━━━━━━━━━━━━━━━━\n📊 {len(docs)} total | 🟢 {len(running)} running")
     await message.reply_text("\n\n".join(lines), parse_mode=HTML)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN ADMIN: /refreshguard — clear group presence cache
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("refreshguard") & filters.user(ADMIN_ID) & filters.private)
+async def refreshguard_cmd(client: Client, message: Message):
+    """Clears the clone group-priority cache.
+    Useful after removing the main bot from a group so clones can take over.
+    """
+    from clone_manager import invalidate_presence_cache
+    args = message.command[1:]
+    if args and args[0].lstrip("-").isdigit():
+        chat_id = int(args[0])
+        invalidate_presence_cache(chat_id)
+        await message.reply_text(
+            f"✅ <b>Cache Cleared</b>\n"
+            f"Group <code>{chat_id}</code> will be re-checked on next message.\n\n"
+            f"If you removed the main bot from that group, clone bots will now respond there.",
+            parse_mode=HTML,
+        )
+    else:
+        invalidate_presence_cache()
+        await message.reply_text(
+            "✅ <b>Full Cache Cleared</b>\n"
+            "All groups will be re-checked on the next message.\n\n"
+            "Clone bots will re-detect where the main bot is/isn't present.",
+            parse_mode=HTML,
+        )
