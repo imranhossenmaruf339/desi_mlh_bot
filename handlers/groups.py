@@ -101,26 +101,59 @@ async def group_command_guard(client: Client, message: Message):
 
     cmd = text.split()[0].lstrip("/").split("@")[0].lower()
 
-    try:
-        await message.delete()
-    except Exception:
-        pass
-
     if cmd == "video":
         bot_username = await get_bot_username(client)
+        user   = message.from_user
+        u_name = (user.first_name or "User") if user else "User"
+
+        # ── Send BIG reply BEFORE deleting the command ────────────────────
         m = await client.send_message(
             message.chat.id,
-            "🎬 <b>Videos are only available in private chat!</b>\n\n"
-            "👇 Tap the button below to get your video:",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton(
-                    "🎬 Get Video Now",
-                    url=f"https://t.me/{bot_username}?start=video",
-                )
-            ]]),
+            f"╔══════════════════════╗\n"
+            f"        🎬 𝑫𝑬𝑺𝑰 𝑴𝑳𝑯 𝑽𝑰𝑫𝑬𝑶\n"
+            f"╚══════════════════════╝\n\n"
+            f"👋 Hey <b>{u_name}</b>!\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚫 <b>Videos are only available</b>\n"
+            f"    in <b>Private Chat</b> with the bot!\n\n"
+            f"🎬 <b>What you get in private:</b>\n"
+            f"   ✅ HD Videos with Spoiler Protection\n"
+            f"   ✅ Daily Limits Based on Your Plan\n"
+            f"   ✅ Premium = More Videos Per Day\n"
+            f"   ✅ Exclusive Premium-Only Content\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💎 <b>Upgrade for more daily videos!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👇 <b>Tap a button below to proceed:</b>",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🎬 Get Video Now",
+                        url=f"https://t.me/{bot_username}?start=video",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🔵⃝𝐂𝐎𝐔𝐏𝐋𝐄⃝🔵",
+                        url="https://t.me/+PnUkO8waIEcyNDY1",
+                    ),
+                ],
+            ]),
+            reply_to_message_id=message.id,
             parse_mode=HTML,
         )
+        # ── Delete the /video command after replying ───────────────────────
+        try:
+            await message.delete()
+        except Exception:
+            pass
         asyncio.create_task(_auto_del(m, 180))
+
+    else:
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
     raise StopPropagation
 
