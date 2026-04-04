@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from pyrogram import filters
@@ -7,10 +8,10 @@ from pyrogram.types import (
 )
 
 from config import (
-    HTML, ADMIN_ID, PACKAGES, PAYMENT_METHODS,
+    HTML, ADMIN_ID, PACKAGES, PACKAGE_ORDER, PAYMENT_METHODS,
     app, users_col, premium_col, proof_sessions,
 )
-from helpers import get_bot_username, log_event
+from helpers import log_event
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -21,7 +22,10 @@ async def get_premium(user_id: int) -> dict | None:
     doc = await premium_col.find_one({"user_id": user_id})
     if not doc:
         return None
-    if doc["expires_at"] < datetime.now(timezone.utc):
+    expires = doc.get("expires_at")
+    if expires is None:
+        return None
+    if expires.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
         await premium_col.delete_one({"user_id": user_id})
         return None
     return doc
@@ -33,129 +37,205 @@ async def get_user_video_limit(user_id: int) -> int:
     if prem:
         return prem["video_limit"]
     user = await users_col.find_one({"user_id": user_id})
-    if user and user.get("custom_limit"):
-        return user["custom_limit"]
+    if user and user.get("video_limit") and user["video_limit"] > 0:
+        return user["video_limit"]
     return DAILY_VIDEO_LIMIT
 
 
+def _packages_text() -> str:
+    lines = []
+    for pkg in PACKAGES.values():
+        vids  = "∞" if pkg["video_limit"] >= 999 else f"{pkg['video_limit']}/day"
+        lines.append(f"<b>{pkg['label']}</b>  •  {pkg['price']}  •  {pkg['days']}d  •  {vids}")
+    body = "\n".join(lines)
+    return (
+        f"<b>💎 ᴘʀᴇᴍɪᴜᴍ ᴘʟᴀɴꜱ</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{body}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"✨ Choose your package 👇"
+    )
+
+
 def _packages_keyboard():
+    keys = list(PACKAGES.items())
     rows = []
-    for key, pkg in PACKAGES.items():
-        rows.append([
-            InlineKeyboardButton(
-                f"{pkg['label']}  •  {pkg['price']}",
+    for i in range(0, len(keys), 2):
+        row = []
+        for key, pkg in keys[i:i+2]:
+            row.append(InlineKeyboardButton(
+                f"{pkg['label']}  {pkg['price']}",
                 callback_data=f"pkg_{key}",
-            )
-        ])
-    rows.append([InlineKeyboardButton("❌ বাতিল", callback_data="pkg_cancel")])
+            ))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="pkg_cancel")])
     return InlineKeyboardMarkup(rows)
 
 
 def _payment_keyboard(pkg_key: str):
-    rows = []
-    for method_key, method in PAYMENT_METHODS.items():
-        rows.append([
-            InlineKeyboardButton(
+    methods = list(PAYMENT_METHODS.items())
+    rows    = []
+    for i in range(0, len(methods), 2):
+        row = []
+        for method_key, method in methods[i:i+2]:
+            row.append(InlineKeyboardButton(
                 method["label"],
                 callback_data=f"pay_{method_key}_{pkg_key}",
-            )
-        ])
-    rows.append([InlineKeyboardButton("🔙 ফিরে যান", callback_data="pkg_back")])
+            ))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="pkg_back")])
     return InlineKeyboardMarkup(rows)
 
 
 def _proof_keyboard(pkg_key: str, method_key: str):
     return InlineKeyboardMarkup([[
         InlineKeyboardButton(
-            "📸 Payment Proof পাঠান",
+            "📸 Send Payment Proof",
             callback_data=f"proof_{pkg_key}_{method_key}",
         ),
-        InlineKeyboardButton("❌ বাতিল", callback_data="pkg_cancel"),
+        InlineKeyboardButton("❌ Cancel", callback_data="pkg_cancel"),
     ]])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  /buypremium  — Package list
+#  /buypremium
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.private & filters.command("buypremium"))
 async def buypremium_cmd(_, message: Message):
     prem = await get_premium(message.from_user.id)
     if prem:
-        remaining = (prem["expires_at"] - datetime.now(timezone.utc)).days
+        remaining = (prem["expires_at"].replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
         pkg = PACKAGES.get(prem["package"], {})
+        lim = prem.get("video_limit", 0)
+        lim_str = "Unlimited" if lim >= 999 else f"{lim}/day"
         await message.reply_text(
-            f"<b>💎 আপনি ইতিমধ্যে Premium সদস্য!</b>\n\n"
-            f"📦 প্যাকেজ: <b>{pkg.get('label', prem['package'])}</b>\n"
-            f"📅 মেয়াদ শেষ: <b>{prem['expires_at'].strftime('%d %b %Y')}</b>\n"
-            f"⏳ বাকি: <b>{remaining} দিন</b>\n"
-            f"🎬 ভিডিও লিমিট: <b>{prem['video_limit']}/দিন</b>",
+            f"<b>💎 You are already a Premium Member!</b>\n\n"
+            f"📦 Package: <b>{pkg.get('label', prem['package'])}</b>\n"
+            f"📅 Expires: <b>{prem['expires_at'].strftime('%d %b %Y')}</b>\n"
+            f"⏳ Remaining: <b>{remaining} days</b>\n"
+            f"🎬 Video Limit: <b>{lim_str}</b>\n\n"
+            f"⬆️ Want to upgrade? Use /upgrade",
             parse_mode=HTML,
         )
         return
-
-    text = (
-        "<b>💎 Premium প্যাকেজ বেছে নিন</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n\n"
+    await message.reply_text(
+        _packages_text(), parse_mode=HTML, reply_markup=_packages_keyboard()
     )
-    for pkg in PACKAGES.values():
-        text += (
-            f"{pkg['label']}  •  <b>{pkg['price']}</b>\n"
-            f"   └ {pkg['desc']}\n\n"
-        )
-    text += "━━━━━━━━━━━━━━━━━━━\nএকটি প্যাকেজ বেছে নিন 👇"
-
-    await message.reply_text(text, parse_mode=HTML, reply_markup=_packages_keyboard())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  /mypremium — Check premium status
+#  /mypremium
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.private & filters.command("mypremium"))
 async def mypremium_cmd(_, message: Message):
     prem = await get_premium(message.from_user.id)
     if not prem:
-        bot_username = await get_bot_username()
         await message.reply_text(
-            "❌ আপনি এখনো Premium সদস্য নন।\n\n"
-            "Premium নিতে /buypremium লিখুন।",
+            "❌ You are not a Premium member yet.\n\nUse /buypremium to get started.",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("💎 Buy Premium ✨", callback_data="open_buypremium"),
+                InlineKeyboardButton("💎 Buy Premium ✨", callback_data="open_buypremium")
             ]]),
         )
         return
-
-    remaining = (prem["expires_at"] - datetime.now(timezone.utc)).days
-    pkg = PACKAGES.get(prem["package"], {})
+    remaining = (prem["expires_at"].replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
+    pkg     = PACKAGES.get(prem["package"], {})
+    lim     = prem.get("video_limit", 0)
+    lim_str = "Unlimited" if lim >= 999 else f"{lim}/day"
     await message.reply_text(
-        f"<b>✅ Premium সদস্যতার তথ্য</b>\n"
+        f"<b>✅ Your Premium Membership</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 প্যাকেজ: <b>{pkg.get('label', prem['package'])}</b>\n"
-        f"📅 শুরু হয়েছে: <b>{prem['started_at'].strftime('%d %b %Y')}</b>\n"
-        f"📅 শেষ হবে: <b>{prem['expires_at'].strftime('%d %b %Y')}</b>\n"
-        f"⏳ বাকি আছে: <b>{remaining} দিন</b>\n"
-        f"🎬 ভিডিও লিমিট: <b>{prem['video_limit']}/দিন</b>",
+        f"📦 Package: <b>{pkg.get('label', prem['package'])}</b>\n"
+        f"📅 Started: <b>{prem.get('started_at', datetime.now(timezone.utc)).strftime('%d %b %Y')}</b>\n"
+        f"📅 Expires: <b>{prem['expires_at'].strftime('%d %b %Y')}</b>\n"
+        f"⏳ Remaining: <b>{remaining} days</b>\n"
+        f"🎬 Video Limit: <b>{lim_str}</b>",
         parse_mode=HTML,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /premiumlist
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.private & filters.command("premiumlist"))
+async def premiumlist_cmd(_, message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    now  = datetime.now(timezone.utc)
+    docs = await premium_col.find({"expires_at": {"$gt": now}}).to_list(length=200)
+    if not docs:
+        await message.reply_text("📭 No active Premium members.")
+        return
+    lines = [f"<b>💎 Active Premium Members ({len(docs)})</b>\n━━━━━━━━━━━━━━━━━━━\n"]
+    for i, doc in enumerate(docs, 1):
+        pkg = PACKAGES.get(doc["package"], {})
+        rem = (doc["expires_at"].replace(tzinfo=timezone.utc) - now).days
+        lines.append(
+            f"{i}. <code>{doc['user_id']}</code> — {pkg.get('label', doc['package'])} ({rem} days left)"
+        )
+    await message.reply_text("\n".join(lines), parse_mode=HTML)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /revokepremium
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.private & filters.command("revokepremium"))
+async def revokepremium_cmd(_, message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.reply_text("⚠️ Usage: /revokepremium &lt;user_id&gt;", parse_mode=HTML)
+        return
+    try:
+        uid = int(parts[1])
+    except ValueError:
+        await message.reply_text("❌ Please provide a valid User ID.")
+        return
+    res = await premium_col.delete_one({"user_id": uid})
+    if res.deleted_count:
+        await message.reply_text(
+            f"✅ Premium revoked for <code>{uid}</code>.", parse_mode=HTML
+        )
+        try:
+            await app.send_message(uid, "⚠️ Your Premium membership has been revoked by the admin.")
+        except Exception:
+            pass
+    else:
+        await message.reply_text(
+            f"❌ <code>{uid}</code> is not a Premium member.", parse_mode=HTML
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /cancel — during proof submission
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.private & filters.command("cancel"))
+async def cancel_proof(_, message: Message):
+    if proof_sessions.pop(message.from_user.id, None):
+        await message.reply_text("❌ Cancelled.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Package selection callback
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_callback_query(filters.regex(r"^pkg_(bronze|silver|gold)$"))
+@app.on_callback_query(filters.regex(r"^pkg_(starter|basic|standard|pro|vip|elite)$"))
 async def pkg_selected(_, cq: CallbackQuery):
     pkg_key = cq.data.split("_", 1)[1]
-    pkg = PACKAGES[pkg_key]
-
+    pkg     = PACKAGES[pkg_key]
+    lim_str = "Unlimited" if pkg["video_limit"] >= 999 else f"{pkg['video_limit']}/day"
     text = (
         f"<b>{pkg['label']} — {pkg['price']}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📅 মেয়াদ: <b>{pkg['days']} দিন</b>\n"
-        f"🎬 ভিডিও: <b>{pkg['video_limit'] if pkg['video_limit'] < 999 else 'Unlimited'}/দিন</b>\n"
+        f"📅 Duration: <b>{pkg['days']} days</b>\n"
+        f"🎬 Videos: <b>{lim_str}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💳 পেমেন্ট পদ্ধতি বেছে নিন 👇"
+        f"💳 Choose a payment method 👇"
     )
     await cq.message.edit_text(text, parse_mode=HTML, reply_markup=_payment_keyboard(pkg_key))
 
@@ -164,107 +244,128 @@ async def pkg_selected(_, cq: CallbackQuery):
 async def pkg_cancel(_, cq: CallbackQuery):
     proof_sessions.pop(cq.from_user.id, None)
     await cq.message.delete()
-    await cq.answer("বাতিল করা হয়েছে।")
+    await cq.answer("Cancelled.")
 
 
 @app.on_callback_query(filters.regex("^pkg_back$"))
 async def pkg_back(_, cq: CallbackQuery):
-    text = (
-        "<b>💎 Premium প্যাকেজ বেছে নিন</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n\n"
+    await cq.message.edit_text(
+        _packages_text(), parse_mode=HTML, reply_markup=_packages_keyboard()
     )
-    for pkg in PACKAGES.values():
-        text += (
-            f"{pkg['label']}  •  <b>{pkg['price']}</b>\n"
-            f"   └ {pkg['desc']}\n\n"
-        )
-    text += "━━━━━━━━━━━━━━━━━━━\nএকটি প্যাকেজ বেছে নিন 👇"
-    await cq.message.edit_text(text, parse_mode=HTML, reply_markup=_packages_keyboard())
 
 
 @app.on_callback_query(filters.regex("^open_buypremium$"))
 async def open_buypremium(_, cq: CallbackQuery):
     await cq.answer()
-    text = (
-        "<b>💎 Premium প্যাকেজ বেছে নিন</b>\n"
-        "━━━━━━━━━━━━━━━━━━━\n\n"
+    await cq.message.edit_text(
+        _packages_text(), parse_mode=HTML, reply_markup=_packages_keyboard()
     )
-    for pkg in PACKAGES.values():
-        text += (
-            f"{pkg['label']}  •  <b>{pkg['price']}</b>\n"
-            f"   └ {pkg['desc']}\n\n"
-        )
-    text += "━━━━━━━━━━━━━━━━━━━\nএকটি প্যাকেজ বেছে নিন 👇"
-    await cq.message.edit_text(text, parse_mode=HTML, reply_markup=_packages_keyboard())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Payment method callback — send QR code
+#  Payment method callback
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_callback_query(filters.regex(r"^pay_(binance|redotpay)_(bronze|silver|gold)$"))
+@app.on_callback_query(
+    filters.regex(r"^pay_(binance|redotpay|trc20|bep20)_(starter|basic|standard|pro|vip|elite)$")
+)
 async def pay_method_selected(_, cq: CallbackQuery):
-    parts       = cq.data.split("_")
-    method_key  = parts[1]
-    pkg_key     = parts[2]
-    method      = PAYMENT_METHODS[method_key]
-    pkg         = PACKAGES[pkg_key]
+    parts      = cq.data.split("_", 2)
+    method_key = parts[1]
+    pkg_key    = parts[2]
+    method     = PAYMENT_METHODS[method_key]
+    pkg        = PACKAGES[pkg_key]
 
-    if method_key == "binance":
-        caption = (
-            f"<b>💛 Binance Pay দিয়ে পেমেন্ট করুন</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 প্যাকেজ: <b>{pkg['label']}</b>\n"
-            f"💵 পরিমাণ: <b>{pkg['price']}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━\n\n"
-            f"👤 Binance নাম: <code>{method['name']}</code>\n\n"
-            f"📱 QR কোড স্ক্যান করুন অথবা নামটি Binance অ্যাপে সার্চ করুন।\n\n"
-            f"✅ পেমেন্টের পর নিচের বাটনে ক্লিক করে screenshot পাঠান।"
+    if method.get("type") == "qr":
+        if method_key == "binance":
+            caption = (
+                f"<b>💛 Binance Pay — {pkg['label']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Package : <b>{pkg['label']}</b>\n"
+                f"💵 Amount  : <b>{pkg['price']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<b>📋 How to pay:</b>\n"
+                f"1️⃣ Open Binance app → Pay → Send\n"
+                f"2️⃣ Search by name: <b>{method.get('name', '')}</b>\n"
+                f"   or scan the QR code\n"
+                f"3️⃣ Send exactly <b>{pkg['price']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📸 Then click below to submit proof."
+            )
+        else:
+            caption = (
+                f"<b>🔴 RedotPay — {pkg['label']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📦 Package : <b>{pkg['label']}</b>\n"
+                f"💵 Amount  : <b>{pkg['price']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<b>📋 How to pay:</b>\n"
+                f"1️⃣ Open RedotPay app → Transfer → Send\n"
+                f"2️⃣ Enter ID: <b>{method.get('id', '')}</b>\n"
+                f"   or scan the QR code\n"
+                f"3️⃣ Send exactly <b>{pkg['price']}</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📸 Then click below to submit proof."
+            )
+        try:
+            await cq.message.delete()
+        except Exception:
+            pass
+        await app.send_photo(
+            chat_id=cq.from_user.id,
+            photo=method["qr"],
+            caption=caption,
+            parse_mode=HTML,
+            reply_markup=_proof_keyboard(pkg_key, method_key),
         )
     else:
-        caption = (
-            f"<b>🔴 RedotPay দিয়ে পেমেন্ট করুন</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━\n"
-            f"📦 প্যাকেজ: <b>{pkg['label']}</b>\n"
-            f"💵 পরিমাণ: <b>{pkg['price']}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🆔 RedotPay ID: <code>{method['id']}</code>\n\n"
-            f"📱 QR কোড স্ক্যান করুন অথবা RedotPay অ্যাপে ID দিয়ে পাঠান।\n\n"
-            f"✅ পেমেন্টের পর নিচের বাটনে ক্লিক করে screenshot পাঠান।"
+        address = method.get("address", "")
+        text = (
+            f"<b>{method['label']} — {pkg['label']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 Package : <b>{pkg['label']}</b>\n"
+            f"💵 Amount  : <b>{pkg['price']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>📋 Wallet Address:</b>\n"
+            f"<code>{address}</code>\n\n"
+            f"⚠️ {method.get('note', '')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📸 After sending, click below to submit proof."
         )
-
-    await cq.message.delete()
-    await app.send_photo(
-        chat_id=cq.from_user.id,
-        photo=method["qr"],
-        caption=caption,
-        parse_mode=HTML,
-        reply_markup=_proof_keyboard(pkg_key, method_key),
-    )
+        await cq.message.edit_text(
+            text, parse_mode=HTML, reply_markup=_proof_keyboard(pkg_key, method_key)
+        )
     await cq.answer()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  "Send Proof" button — ask user for screenshot
+#  "Send Proof" button
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_callback_query(filters.regex(r"^proof_(bronze|silver|gold)_(binance|redotpay)$"))
+@app.on_callback_query(
+    filters.regex(r"^proof_(starter|basic|standard|pro|vip|elite)_(binance|redotpay|trc20|bep20)$")
+)
 async def proof_btn(_, cq: CallbackQuery):
-    parts     = cq.data.split("_")
-    pkg_key   = parts[1]
+    parts      = cq.data.split("_", 2)
+    pkg_key    = parts[1]
     method_key = parts[2]
-    user_id   = cq.from_user.id
+    user_id    = cq.from_user.id
 
     proof_sessions[user_id] = {"pkg": pkg_key, "method": method_key}
 
-    await cq.answer("এখন screenshot পাঠান।")
+    await cq.answer("Now send your payment screenshot.")
     await app.send_message(
         chat_id=user_id,
         text=(
-            "📸 <b>Payment screenshot পাঠান</b>\n\n"
-            "এখনই পেমেন্টের screenshot টি এই চ্যাটে পাঠান।\n"
-            "Admin যাচাই করার পর আপনার Premium সক্রিয় হবে।\n\n"
-            "বাতিল করতে /cancel লিখুন।"
+            "📸 <b>SEND PAYMENT SCREENSHOT</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Please send your payment screenshot\n"
+            "in this chat right now.\n\n"
+            "⏳ Premium will be activated after\n"
+            "   admin verification.\n\n"
+            "❌ To cancel: /cancel\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 DESI MLH SYSTEM"
         ),
         parse_mode=HTML,
     )
@@ -289,31 +390,35 @@ async def proof_photo_handler(_, message: Message):
 
     proof_sessions.pop(user_id, None)
 
-    name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-    username_str = f"@{user.username}" if user.username else "নেই"
+    name         = f"{user.first_name or ''} {user.last_name or ''}".strip()
+    username_str = f"@{user.username}" if user.username else "N/A"
+    upgrade_from = session.get("upgrade_from")
+    pay_amount   = session.get("pay_amount")
+
+    if upgrade_from:
+        from_pkg = PACKAGES.get(upgrade_from, {})
+        header   = f"⬆️ UPGRADE: {from_pkg.get('label', upgrade_from)} → {pkg['label']}"
+        pay_str  = f"${pay_amount} USDT (UPGRADE)"
+    else:
+        header  = "💳 New Payment Proof"
+        pay_str = pkg["price"]
 
     caption = (
-        f"<b>💳 নতুন পেমেন্ট প্রুফ</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 নাম: <b>{name}</b>\n"
+        f"<b>{header}</b>\n━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 Name: <b>{name}</b>\n"
         f"🆔 User ID: <code>{user_id}</code>\n"
         f"📛 Username: {username_str}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 প্যাকেজ: <b>{pkg['label']}</b> ({pkg['price']})\n"
-        f"📅 মেয়াদ: <b>{pkg['days']} দিন</b>\n"
-        f"💳 পেমেন্ট: <b>{method['label']}</b>\n"
+        f"📦 Package: <b>{pkg['label']}</b>\n"
+        f"📅 Duration: <b>{pkg['days']} days</b>\n"
+        f"💳 Method: <b>{method['label']}</b>\n"
+        f"💰 Amount: <b>{pay_str}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━"
     )
 
     approve_kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "✅ Approve",
-            callback_data=f"prem_approve_{user_id}_{pkg_key}",
-        ),
-        InlineKeyboardButton(
-            "❌ Reject",
-            callback_data=f"prem_reject_{user_id}",
-        ),
+        InlineKeyboardButton("✅ Approve", callback_data=f"prem_approve_{user_id}_{pkg_key}"),
+        InlineKeyboardButton("❌ Reject",  callback_data=f"prem_reject_{user_id}"),
     ]])
 
     await app.send_photo(
@@ -325,32 +430,30 @@ async def proof_photo_handler(_, message: Message):
     )
 
     await message.reply_text(
-        "✅ <b>প্রুফ পাঠানো হয়েছে!</b>\n\n"
-        "Admin যাচাই করার পর আপনাকে notify করা হবে।\n"
-        "সাধারণত ১-২৪ ঘণ্টার মধ্যে Activate হয়।",
+        "✅ <b>PROOF SUBMITTED!</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "📩 Your screenshot has been sent\n"
+        "   to the admin for review.\n\n"
+        "⏰ Estimated activation time:\n"
+        "   1–24 hours\n\n"
+        "🔔 You'll receive a notification\n"
+        "   once it's approved.\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "🤖 DESI MLH SYSTEM",
         parse_mode=HTML,
     )
-    await log_event(f"💳 Payment proof from {name} ({user_id}) — {pkg['label']} via {method['label']}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  /cancel during proof session
+#  Approve / Reject callbacks
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.on_message(filters.private & filters.command("cancel"))
-async def cancel_proof(_, message: Message):
-    if proof_sessions.pop(message.from_user.id, None):
-        await message.reply_text("❌ বাতিল করা হয়েছে।")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Admin: Approve Premium
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_callback_query(filters.regex(r"^prem_approve_(\d+)_(bronze|silver|gold)$"))
+@app.on_callback_query(
+    filters.regex(r"^prem_approve_(\d+)_(starter|basic|standard|pro|vip|elite)$")
+)
 async def prem_approve(_, cq: CallbackQuery):
     if cq.from_user.id != ADMIN_ID:
-        await cq.answer("⛔ শুধু Admin পারবেন।", show_alert=True)
+        await cq.answer("⛔ Admin only.", show_alert=True)
         return
 
     parts   = cq.data.split("_")
@@ -364,49 +467,61 @@ async def prem_approve(_, cq: CallbackQuery):
     await premium_col.update_one(
         {"user_id": uid},
         {"$set": {
-            "user_id":    uid,
-            "package":    pkg_key,
+            "user_id":     uid,
+            "package":     pkg_key,
             "video_limit": pkg["video_limit"],
-            "started_at": now,
-            "expires_at": expires,
+            "started_at":  now,
+            "expires_at":  expires,
         }},
         upsert=True,
     )
+    today_str = now.strftime("%Y-%m-%d")
+    await users_col.update_one(
+        {"user_id": uid},
+        {"$set": {"video_count": 0, "video_date": today_str}},
+    )
 
+    lim_str = "Unlimited" if pkg["video_limit"] >= 999 else f"{pkg['video_limit']}/day"
     try:
         await app.send_message(
             chat_id=uid,
             text=(
-                f"🎉 <b>অভিনন্দন! Premium Activated!</b>\n"
+                f"🎉 <b>Congratulations! Premium Activated!</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"📦 প্যাকেজ: <b>{pkg['label']}</b>\n"
-                f"🎬 ভিডিও লিমিট: <b>{pkg['video_limit'] if pkg['video_limit'] < 999 else 'Unlimited'}/দিন</b>\n"
-                f"📅 মেয়াদ: <b>{pkg['days']} দিন</b>\n"
-                f"📅 শেষ হবে: <b>{expires.strftime('%d %b %Y')}</b>\n"
+                f"📦 Package: <b>{pkg['label']}</b>\n"
+                f"🎬 Video Limit: <b>{lim_str}</b>\n"
+                f"📅 Duration: <b>{pkg['days']} days</b>\n"
+                f"📅 Expires: <b>{expires.strftime('%d %b %Y')}</b>\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
-                f"ধন্যবাদ আমাদের সাথে থাকার জন্য! 💖"
+                f"✅ Your daily video counter has been reset.\n"
+                f"Enjoy your Premium access! 💖"
             ),
             parse_mode=HTML,
         )
     except Exception:
         pass
 
-    await cq.message.edit_caption(
-        cq.message.caption + f"\n\n✅ <b>Approved by Admin</b> — {now.strftime('%d %b %Y %H:%M')} UTC",
-        parse_mode=HTML,
-    )
-    await cq.answer("✅ Premium Activate করা হয়েছে!")
-    await log_event(f"✅ Premium approved: uid={uid} pkg={pkg_key}")
+    try:
+        await cq.message.edit_caption(
+            cq.message.caption + f"\n\n✅ <b>Approved by Admin</b> — {now.strftime('%d %b %Y %H:%M')} UTC",
+            parse_mode=HTML,
+        )
+    except Exception:
+        pass
 
+    await cq.answer("✅ Premium activated!")
+    asyncio.create_task(log_event(
+        cq._client,
+        f"✅ <b>Premium Approved</b>\n"
+        f"👤 User: <code>{uid}</code>\n"
+        f"📦 Package: {pkg['label']}"
+    ))
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Admin: Reject Premium
-# ─────────────────────────────────────────────────────────────────────────────
 
 @app.on_callback_query(filters.regex(r"^prem_reject_(\d+)$"))
 async def prem_reject(_, cq: CallbackQuery):
     if cq.from_user.id != ADMIN_ID:
-        await cq.answer("⛔ শুধু Admin পারবেন।", show_alert=True)
+        await cq.answer("⛔ Admin only.", show_alert=True)
         return
 
     uid = int(cq.data.split("_")[2])
@@ -415,9 +530,18 @@ async def prem_reject(_, cq: CallbackQuery):
         await app.send_message(
             chat_id=uid,
             text=(
-                "❌ <b>Payment Proof গ্রহণ করা হয়নি।</b>\n\n"
-                "পেমেন্টের সঠিক screenshot পুনরায় পাঠান অথবা\n"
-                "Admin-এর সাথে যোগাযোগ করুন: @IH_Maruf"
+                "❌ <b>PAYMENT PROOF REJECTED</b>\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "Your payment screenshot was not\n"
+                "accepted by the admin.\n\n"
+                "📌 Possible reasons:\n"
+                "• Screenshot is unclear or invalid\n"
+                "• Wrong payment amount\n"
+                "• Unrecognized payment method\n\n"
+                "🔄 Try again: /buypremium\n"
+                "📩 Need help? Contact: @IH_Maruf\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "🤖 DESI MLH SYSTEM"
             ),
             parse_mode=HTML,
         )
@@ -425,68 +549,198 @@ async def prem_reject(_, cq: CallbackQuery):
         pass
 
     now = datetime.now(timezone.utc)
-    await cq.message.edit_caption(
-        cq.message.caption + f"\n\n❌ <b>Rejected by Admin</b> — {now.strftime('%d %b %Y %H:%M')} UTC",
-        parse_mode=HTML,
-    )
-    await cq.answer("❌ Reject করা হয়েছে।")
-    await log_event(f"❌ Premium rejected: uid={uid}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Admin: /premiumlist  — list all active premium users
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.private & filters.command("premiumlist"))
-async def premiumlist_cmd(_, message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    now  = datetime.now(timezone.utc)
-    docs = await premium_col.find({"expires_at": {"$gt": now}}).to_list(length=200)
-
-    if not docs:
-        await message.reply_text("📭 কোনো Active Premium সদস্য নেই।")
-        return
-
-    lines = [f"<b>💎 Active Premium সদস্য ({len(docs)} জন)</b>\n━━━━━━━━━━━━━━━━━━━\n"]
-    for i, doc in enumerate(docs, 1):
-        pkg     = PACKAGES.get(doc["package"], {})
-        rem     = (doc["expires_at"] - now).days
-        lines.append(
-            f"{i}. <code>{doc['user_id']}</code> — {pkg.get('label', doc['package'])} "
-            f"(বাকি {rem} দিন)"
-        )
-
-    await message.reply_text("\n".join(lines), parse_mode=HTML)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Admin: /revokepremium <user_id>
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_message(filters.private & filters.command("revokepremium"))
-async def revokepremium_cmd(_, message: Message):
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.reply_text("⚠️ ব্যবহার: /revokepremium &lt;user_id&gt;", parse_mode=HTML)
-        return
-
     try:
-        uid = int(parts[1])
-    except ValueError:
-        await message.reply_text("❌ সঠিক User ID দিন।")
+        await cq.message.edit_caption(
+            cq.message.caption + f"\n\n❌ <b>Rejected by Admin</b> — {now.strftime('%d %b %Y %H:%M')} UTC",
+            parse_mode=HTML,
+        )
+    except Exception:
+        pass
+
+    await cq.answer("❌ Rejected.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  /upgrade — upgrade premium package
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_message(filters.private & filters.command("upgrade"))
+async def upgrade_cmd(_, message: Message):
+    user_id  = message.from_user.id
+    prem_doc = await get_premium(user_id)
+    if not prem_doc:
+        await message.reply_text(
+            "❌ You don't have an active premium plan.\n\nUse /buypremium to get started.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💎 Buy Premium", callback_data="open_buypremium")
+            ]]),
+        )
         return
 
-    res = await premium_col.delete_one({"user_id": uid})
-    if res.deleted_count:
-        await message.reply_text(f"✅ <code>{uid}</code>-এর Premium বাতিল করা হয়েছে।", parse_mode=HTML)
+    current_key = prem_doc.get("package", "starter")
+    try:
+        current_idx = PACKAGE_ORDER.index(current_key)
+    except ValueError:
+        current_idx = 0
+
+    upgrade_pkgs = PACKAGE_ORDER[current_idx + 1:]
+    if not upgrade_pkgs:
+        await message.reply_text(
+            "✅ You are already on the <b>highest plan</b> (Elite)!\n\n"
+            "Nothing to upgrade — enjoy unlimited access. 👑",
+            parse_mode=HTML,
+        )
+        return
+
+    current_price = PACKAGES.get(current_key, {}).get("price_usd", 0)
+    rows = []
+    for pkg_key in upgrade_pkgs:
+        pkg  = PACKAGES[pkg_key]
+        diff = pkg["price_usd"] - current_price
+        rows.append([InlineKeyboardButton(
+            f"{pkg['label']}  •  Pay ${diff} USDT",
+            callback_data=f"upg_{pkg_key}",
+        )])
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="pkg_cancel")])
+
+    exp       = prem_doc.get("expires_at")
+    days_left = (exp.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days if exp else 0
+    cur_pkg   = PACKAGES.get(current_key, {})
+
+    await message.reply_text(
+        f"⬆️ <b>UPGRADE YOUR PLAN</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 Current: <b>{cur_pkg.get('label', current_key)}</b> (${current_price})\n"
+        f"⏳ Remaining: <b>{days_left} days</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 You only pay the <b>difference</b>!\n\n"
+        f"Select a plan to upgrade to 👇",
+        parse_mode=HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+@app.on_callback_query(filters.regex(r"^upg_(starter|basic|standard|pro|vip|elite)$"))
+async def upg_pkg_selected(_, cq: CallbackQuery):
+    pkg_key  = cq.data.split("_", 1)[1]
+    pkg      = PACKAGES[pkg_key]
+    user_id  = cq.from_user.id
+    prem_doc = await get_premium(user_id)
+
+    if not prem_doc:
+        await cq.answer("No active premium. Use /buypremium.", show_alert=True)
+        return
+
+    current_key   = prem_doc.get("package", "starter")
+    current_price = PACKAGES.get(current_key, {}).get("price_usd", 0)
+    diff          = max(0, pkg["price_usd"] - current_price)
+    lim_str       = "Unlimited" if pkg["video_limit"] >= 999 else f"{pkg['video_limit']}/day"
+
+    exp       = prem_doc.get("expires_at")
+    days_left = (exp.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days if exp else 0
+
+    rows = []
+    for method_key, method in PAYMENT_METHODS.items():
+        rows.append([InlineKeyboardButton(
+            method["label"],
+            callback_data=f"upgpay_{method_key}_{pkg_key}",
+        )])
+    rows.append([InlineKeyboardButton("🔙 Back", callback_data="open_buypremium")])
+
+    await cq.message.edit_text(
+        f"⬆️ <b>UPGRADE PLAN</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 From     : <b>{PACKAGES.get(current_key, {}).get('label', current_key)}</b>\n"
+        f"📦 To       : <b>{pkg['label']}</b> (${pkg['price_usd']})\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 You Pay: <b>${diff} USDT</b>\n"
+        f"🎬 New Limit: <b>{lim_str}</b>\n"
+        f"📅 Duration: <b>{pkg['days']} days</b>\n"
+        f"⏳ Expiry: <b>{days_left}d remaining (resets)</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Select payment method:",
+        parse_mode=HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+    await cq.answer()
+
+
+@app.on_callback_query(
+    filters.regex(r"^upgpay_(binance|redotpay|trc20|bep20)_(starter|basic|standard|pro|vip|elite)$")
+)
+async def upgpay_method_selected(_, cq: CallbackQuery):
+    parts      = cq.data.split("_")
+    method_key = parts[1]
+    pkg_key    = parts[2]
+    method     = PAYMENT_METHODS[method_key]
+    pkg        = PACKAGES[pkg_key]
+    user_id    = cq.from_user.id
+
+    prem_doc = await get_premium(user_id)
+    if not prem_doc:
+        await cq.answer("No active premium. Use /buypremium.", show_alert=True)
+        return
+
+    current_key   = prem_doc.get("package", "starter")
+    current_price = PACKAGES.get(current_key, {}).get("price_usd", 0)
+    diff          = max(0, pkg["price_usd"] - current_price)
+    price_str     = f"${diff} USDT"
+
+    proof_sessions[user_id] = {
+        "pkg":          pkg_key,
+        "method":       method_key,
+        "upgrade_from": current_key,
+        "pay_amount":   diff,
+    }
+
+    if method.get("type") == "qr":
+        caption = (
+            f"<b>⬆️ UPGRADE PAYMENT — {pkg['label']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Amount to Pay: <b>{price_str}</b>\n"
+            f"💳 Method: <b>{method['label']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 {method.get('note', '')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📸 After payment, send your screenshot in chat."
+        )
         try:
-            await app.send_message(uid, "⚠️ আপনার Premium সদস্যতা বাতিল করা হয়েছে।")
+            await cq.message.delete()
         except Exception:
             pass
+        await app.send_photo(
+            chat_id=user_id,
+            photo=method["qr"],
+            caption=caption,
+            parse_mode=HTML,
+        )
     else:
-        await message.reply_text(f"❌ <code>{uid}</code> Premium সদস্য নন।", parse_mode=HTML)
+        text = (
+            f"<b>⬆️ UPGRADE — {pkg['label']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Amount   : <b>{price_str}</b>\n"
+            f"💳 Method   : <b>{method['label']}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Wallet Address:</b>\n<code>{method.get('address', '')}</code>\n\n"
+            f"⚠️ {method.get('note', '')}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📸 Send screenshot after payment."
+        )
+        try:
+            await cq.message.edit_text(text, parse_mode=HTML)
+        except Exception:
+            await app.send_message(user_id, text, parse_mode=HTML)
+
+    await app.send_message(
+        chat_id=user_id,
+        text=(
+            "📸 <b>SEND UPGRADE PAYMENT SCREENSHOT</b>\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "Please send your payment screenshot now.\n\n"
+            "❌ To cancel: /cancel\n"
+            "━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 DESI MLH SYSTEM"
+        ),
+        parse_mode=HTML,
+    )
+    await cq.answer()
