@@ -53,6 +53,23 @@ async def get_fj_channels(client=None) -> list:
 
 
 async def get_not_joined(client: Client, user_id: int, channels: list) -> list:
+    """Return channels the user has NOT fully joined.
+
+    Only checks membership status — NEVER approves any join request.
+    A user with a pending join request is treated as NOT joined until
+    the channel admin manually approves them.
+
+    Statuses counted as JOINED: OWNER, ADMINISTRATOR, MEMBER, RESTRICTED.
+    Everything else (LEFT, BANNED, any exception) → NOT joined.
+    """
+    from pyrogram import enums
+    _JOINED = {
+        enums.ChatMemberStatus.OWNER,
+        enums.ChatMemberStatus.ADMINISTRATOR,
+        enums.ChatMemberStatus.MEMBER,
+        enums.ChatMemberStatus.RESTRICTED,   # in chat but restricted — still a member
+    }
+
     not_joined = []
     for ch in channels:
         raw_cid = ch.get("chat_id", "")
@@ -62,13 +79,11 @@ async def get_not_joined(client: Client, user_id: int, channels: list) -> list:
             cid = str(raw_cid)
         try:
             member = await client.get_chat_member(cid, user_id)
-            from pyrogram import enums
-            if member.status in (
-                enums.ChatMemberStatus.LEFT,
-                enums.ChatMemberStatus.BANNED,
-            ):
+            if member.status not in _JOINED:
                 not_joined.append(ch)
         except Exception:
+            # UserNotParticipant, ChannelPrivate, PeerIdInvalid, or
+            # any other error → treat as not joined (safe fallback).
             not_joined.append(ch)
     return not_joined
 
