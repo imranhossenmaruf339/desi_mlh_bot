@@ -224,7 +224,9 @@ async def grp_btn_callback(client: Client, cq: CallbackQuery):
         "antiflood", "welcome", "setrules", "rules", "clearrules",
         "mute", "unmute", "ban", "unban", "warn", "clearwarn", "warns",
         "kick", "del", "ro", "pin", "unpin", "report",
-        "chat", "inbox", "groups",
+        "chat", "inbox", "groups", "resetcount",
+        "addadmin", "removeadmin", "admins",
+        "addclone", "removeclone", "clones",
     ])
 )
 async def admin_message_handler(client: Client, message: Message):
