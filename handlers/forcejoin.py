@@ -157,12 +157,12 @@ async def _fj_show_add_card(reply_fn, doc: dict):
     lines    = [f"  {i}. {c['name']}" for i, c in enumerate(channels, 1)]
     ch_list  = "\n".join(lines) if lines else "  (none yet)"
     await reply_fn(
-        "📢 <b>Force Join — Add Channel</b>\n"
+        "📢 <b>Force Join — Add Channel / Group</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Channels added so far: <b>{len(channels)}</b>\n"
+        f"Added so far: <b>{len(channels)}</b>\n"
         f"{ch_list}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Click <b>Set Button</b> to add a new channel.\n\n"
+        "Click <b>Set Button</b> to add a channel or group.\n\n"
         "Type /cancel to cancel.",
         parse_mode=HTML,
         reply_markup=InlineKeyboardMarkup([[
@@ -178,11 +178,12 @@ def _fj_status_text(doc: dict) -> str:
     lines    = [
         "📢 FORCE JOIN STATUS",
         "━━━━━━━━━━━━━━━━━━━━━━",
-        f"Status   : {enabled}",
-        f"Channels : {len(channels)}",
+        f"Status          : {enabled}",
+        f"Channels/Groups : {len(channels)}",
     ]
     for i, ch in enumerate(channels, 1):
-        cid = ch.get("chat_id", "?")
+        cid  = ch.get("chat_id", "?")
+        kind = "👥 Group" if str(cid).lstrip("-").isdigit() and not str(cid).startswith("-100") else "📢 Channel/Group"
         lines.append(f"  {i}. {ch['name']}")
         lines.append(f"     🔗 {ch['link']}")
         lines.append(f"     🆔 {cid}")
@@ -191,8 +192,8 @@ def _fj_status_text(doc: dict) -> str:
         "Commands:",
         "/forcejoin on          — Enable",
         "/forcejoin off         — Disable",
-        "/forcejoin add         — Add a channel (wizard)",
-        "/forcejoin remove <n>  — Remove channel #n",
+        "/forcejoin add         — Add channel/group (wizard)",
+        "/forcejoin remove <n>  — Remove entry #n",
         "/forcejoin list        — Show this list",
         "━━━━━━━━━━━━━━━━━━━━━━",
         "🤖 DESI MLH SYSTEM",
@@ -404,16 +405,18 @@ async def fj_set_button_cb(client: Client, cq: CallbackQuery):
         "fj_key":              _fj_key(client),   # store which bot this belongs to
     }
     await cq.edit_message_text(
-        "📢 <b>Step 1 — Send Channel Info</b>\n"
+        "📢 <b>Step 1 — Add Channel or Group</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Format: <code>Channel Name | Join Link</code>\n\n"
-        "🌐 <b>Public channel:</b>\n"
+        "<b>Format:</b> <code>Name | Join Link</code>\n\n"
+        "🌐 <b>Public channel/group:</b>\n"
         "<code>DESI MLH | https://t.me/desimlh</code>\n\n"
-        "🔒 <b>Private channel (invite link):</b>\n"
+        "🔒 <b>Private (invite link):</b>\n"
         "<code>VIP Group | https://t.me/+dV5BmONTLmcxZDU1</code>\n"
-        "↳ Bot will ask you to <b>forward a message</b> from it next.\n\n"
-        "📦 <b>Multiple at once (use &&):</b>\n"
-        "<code>DESI MLH | https://t.me/desimlh && VIP | https://t.me/+xxx</code>\n\n"
+        "↳ Bot will ask for the <b>chat ID</b> next step.\n\n"
+        "🆔 <b>With ID (skip the ID step):</b>\n"
+        "<code>My Group | https://t.me/+xxx | -1001234567890</code>\n\n"
+        "📦 <b>Multiple at once:</b>\n"
+        "<code>Channel 1 | link1 && Channel 2 | link2</code>\n\n"
         "Type /cancel to cancel.",
         parse_mode=HTML,
         reply_markup=InlineKeyboardMarkup([[
