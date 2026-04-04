@@ -11,7 +11,7 @@ from config import (
     HTML, ADMIN_ID, PACKAGES, PACKAGE_ORDER, PAYMENT_METHODS,
     app, users_col, premium_col, proof_sessions,
 )
-from helpers import log_event
+from helpers import log_event, bot_api
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +83,12 @@ def _payment_keyboard(pkg_key: str):
                 callback_data=f"pay_{method_key}_{pkg_key}",
             ))
         rows.append(row)
+    pkg = PACKAGES.get(pkg_key, {})
+    stars = pkg.get("stars", 0)
+    rows.append([InlineKeyboardButton(
+        f"⭐ Pay with Telegram Stars ({stars} Stars)",
+        callback_data=f"pay_stars_{pkg_key}",
+    )])
     rows.append([InlineKeyboardButton("🔙 Back", callback_data="pkg_back")])
     return InlineKeyboardMarkup(rows)
 
@@ -336,6 +342,49 @@ async def pay_method_selected(_, cq: CallbackQuery):
             text, parse_mode=HTML, reply_markup=_proof_keyboard(pkg_key, method_key)
         )
     await cq.answer()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Telegram Stars payment callback — sends invoice directly
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.on_callback_query(
+    filters.regex(r"^pay_stars_(starter|basic|standard|pro|vip|elite)$")
+)
+async def pay_stars_selected(_, cq: CallbackQuery):
+    pkg_key = cq.data.split("_", 2)[2]
+    pkg     = PACKAGES[pkg_key]
+    uid     = cq.from_user.id
+    stars   = pkg["stars"]
+    lim_str = "Unlimited" if pkg["video_limit"] >= 999 else f"{pkg['video_limit']}/day"
+
+    await cq.answer("Opening Telegram Stars payment…")
+
+    try:
+        await cq.message.delete()
+    except Exception:
+        pass
+
+    resp = await bot_api("sendInvoice", {
+        "chat_id":     uid,
+        "title":       f"{pkg['label']} Premium",
+        "description": f"{pkg['days']} Days • {lim_str} Videos/Day\nInstant activation — no admin needed!",
+        "payload":     f"stars_{pkg_key}",
+        "currency":    "XTR",
+        "prices":      [{"label": pkg["label"], "amount": stars}],
+    })
+
+    if not resp.get("ok"):
+        err = resp.get("description", "unknown error")
+        await bot_api("sendMessage", {
+            "chat_id":    uid,
+            "parse_mode": "HTML",
+            "text": (
+                "❌ <b>Could not open Stars payment.</b>\n\n"
+                f"Reason: <code>{err}</code>\n\n"
+                "Please try a crypto payment method or contact admin."
+            ),
+        })
 
 
 # ─────────────────────────────────────────────────────────────────────────────
