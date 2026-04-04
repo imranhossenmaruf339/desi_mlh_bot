@@ -259,93 +259,137 @@ async def admin_message_handler(client: Client, message: Message):
 
             if not parsed:
                 await message.reply_text(
-                    "❌ Could not parse. Format:\n"
-                    "<code>Channel Name | https://t.me/...</code>\n\n"
-                    "Multiple:\n"
-                    "<code>Channel 1 | link1 && Channel 2 | link2</code>",
+                    "❌ Could not parse. Use this format:\n\n"
+                    "<code>Name | https://t.me/link</code>\n\n"
+                    "To skip the ID step, add it as 3rd part:\n"
+                    "<code>Name | https://t.me/+xxx | -1001234567890</code>\n\n"
+                    "Multiple at once:\n"
+                    "<code>Ch1 | link1 && Ch2 | link2</code>",
                     parse_mode=HTML,
                 )
                 return
 
-            public_channels  = [c for c in parsed if "+" not in c.get("link", "")]
-            private_channels = [c for c in parsed if "+" in     c.get("link", "")]
+            # ── Separate: already has a numeric/username ID vs still needs ID ──
+            def _is_resolved(ch):
+                cid = str(ch.get("chat_id", ""))
+                # Numeric ID (e.g. -1001234567890)
+                if cid.lstrip("-").isdigit():
+                    return True
+                # @username
+                if cid.startswith("@") and len(cid) > 1:
+                    return True
+                return False
 
-            for ch in public_channels:
+            resolved   = [c for c in parsed if _is_resolved(c)]
+            unresolved = [c for c in parsed if not _is_resolved(c)]
+
+            for ch in resolved:
                 fj["pending_channels"].append(ch)
 
-            if private_channels:
-                fj["unresolved_channels"] = private_channels
+            if unresolved:
+                fj["unresolved_channels"] = unresolved
                 fj["fwd_index"] = 0
                 fj["state"]     = "fj_wait_fwd"
-                ch0 = private_channels[0]
+                ch0 = unresolved[0]
                 await message.reply_text(
-                    f"🔒 <b>Private Channel Detected</b>\n"
+                    f"🔒 <b>Step 2 — Set Chat ID</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Channel: <b>{ch0['name']}</b>\n"
-                    f"Link: {ch0['link']}\n\n"
-                    "To get the numeric chat ID, please <b>forward any message</b> "
-                    "from this private channel here.",
-                    parse_mode=HTML,
-                )
-                return
-
-            fj["state"] = "fj_add_confirm"
-            pending = fj["pending_channels"]
-            lines   = "\n".join(f"  {i+1}. {c['name']}" for i, c in enumerate(pending))
-            await message.reply_text(
-                f"📢 <b>Confirm Adding {len(pending)} Channel(s)</b>\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{lines}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━\n"
-                "Tap <b>Confirm</b> to save or <b>Cancel</b> to abort.",
-                parse_mode=HTML,
-                reply_markup=__import__("pyrogram.types", fromlist=["InlineKeyboardMarkup"]).InlineKeyboardMarkup([[
-                    __import__("pyrogram.types", fromlist=["InlineKeyboardButton"]).InlineKeyboardButton("✅ Confirm", callback_data="fj_confirm"),
-                    __import__("pyrogram.types", fromlist=["InlineKeyboardButton"]).InlineKeyboardButton("❌ Cancel",  callback_data="fj_cancel"),
-                ]]),
-            )
-            return
-
-        if state == "fj_wait_fwd":
-            unresolved = fj.get("unresolved_channels", [])
-            idx        = fj.get("fwd_index", 0)
-            if idx >= len(unresolved):
-                fj["state"] = "fj_add_confirm"
-                return
-
-            fwd_chat = getattr(message, "forward_from_chat", None)
-            if not fwd_chat:
-                ch = unresolved[idx]
-                await message.reply_text(
-                    f"⚠️ That message wasn't forwarded from <b>{ch['name']}</b>.\n"
-                    "Please forward a message <b>directly from the channel</b>.",
-                    parse_mode=HTML,
-                )
-                return
-
-            ch             = unresolved[idx]
-            ch["chat_id"]  = str(fwd_chat.id)
-            fj["pending_channels"].append(ch)
-            fj["fwd_index"] = idx + 1
-
-            if fj["fwd_index"] < len(unresolved):
-                next_ch = unresolved[fj["fwd_index"]]
-                await message.reply_text(
-                    f"✅ Got it! <b>{ch['name']}</b> → ID: <code>{fwd_chat.id}</code>\n\n"
-                    f"Now forward a message from <b>{next_ch['name']}</b>.",
+                    f"📢 Name : <b>{ch0['name']}</b>\n"
+                    f"🔗 Link : {ch0['link']}\n\n"
+                    "Please provide the <b>chat ID</b> using <b>one of these methods</b>:\n\n"
+                    "1️⃣ <b>Forward</b> any message from that channel/group\n"
+                    "2️⃣ <b>Type</b> the numeric ID directly:\n"
+                    "   <code>-1001234567890</code>\n\n"
+                    "💡 To find the ID: add @userinfobot to the channel/group\n"
+                    "   and it will show the numeric ID.\n\n"
+                    "Type /cancel to abort.",
                     parse_mode=HTML,
                 )
                 return
 
             from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             fj["state"] = "fj_add_confirm"
-            pending     = fj["pending_channels"]
-            lines       = "\n".join(f"  {i+1}. {c['name']}" for i, c in enumerate(pending))
+            pending = fj["pending_channels"]
+            lines   = "\n".join(f"  {i+1}. {c['name']}  🆔 <code>{c.get('chat_id','?')}</code>"
+                                for i, c in enumerate(pending))
             await message.reply_text(
-                f"📢 <b>Confirm Adding {len(pending)} Channel(s)</b>\n"
+                f"✅ <b>Confirm Adding {len(pending)} Entry(s)</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"{lines}\n"
-                "━━━━━━━━━━━━━━━━━━━━━━",
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Tap <b>Confirm</b> to save or <b>Cancel</b> to abort.",
+                parse_mode=HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Confirm", callback_data="fj_confirm"),
+                    InlineKeyboardButton("❌ Cancel",  callback_data="fj_cancel"),
+                ]]),
+            )
+            return
+
+        if state == "fj_wait_fwd":
+            from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            if text_in.lower() == "/cancel":
+                fj_sessions.pop(uid, None)
+                await message.reply_text("🚫 Cancelled.")
+                return
+
+            unresolved = fj.get("unresolved_channels", [])
+            idx        = fj.get("fwd_index", 0)
+            if idx >= len(unresolved):
+                fj["state"] = "fj_add_confirm"
+                return
+
+            ch = unresolved[idx]
+
+            # ── Method 1: forwarded message ─────────────────────────────────
+            fwd_chat = getattr(message, "forward_from_chat", None)
+            if fwd_chat:
+                resolved_id = str(fwd_chat.id)
+
+            # ── Method 2: typed numeric ID or @username ──────────────────────
+            elif text_in and (text_in.lstrip("-").isdigit() or text_in.startswith("@")):
+                resolved_id = text_in.strip()
+
+            else:
+                # Still no valid ID — re-prompt
+                await message.reply_text(
+                    f"⚠️ Could not detect the chat ID for <b>{ch['name']}</b>.\n\n"
+                    "Please use <b>one of these methods</b>:\n"
+                    "1️⃣ <b>Forward</b> any message from that channel/group\n"
+                    "2️⃣ <b>Type</b> the numeric ID:  <code>-1001234567890</code>\n\n"
+                    "Type /cancel to abort.",
+                    parse_mode=HTML,
+                )
+                return
+
+            # ── Got the ID — save and advance ───────────────────────────────
+            ch["chat_id"] = resolved_id
+            fj["pending_channels"].append(ch)
+            fj["fwd_index"] = idx + 1
+
+            if fj["fwd_index"] < len(unresolved):
+                next_ch = unresolved[fj["fwd_index"]]
+                await message.reply_text(
+                    f"✅ Got it! <b>{ch['name']}</b> → ID: <code>{resolved_id}</code>\n\n"
+                    f"📢 Next: <b>{next_ch['name']}</b>\n"
+                    f"🔗 {next_ch['link']}\n\n"
+                    "Send the chat ID:\n"
+                    "1️⃣ <b>Forward</b> a message from that channel/group\n"
+                    "2️⃣ <b>Type</b> the ID:  <code>-1001234567890</code>",
+                    parse_mode=HTML,
+                )
+                return
+
+            fj["state"] = "fj_add_confirm"
+            pending     = fj["pending_channels"]
+            lines       = "\n".join(f"  {i+1}. {c['name']}  🆔 <code>{c.get('chat_id','?')}</code>"
+                                    for i, c in enumerate(pending))
+            await message.reply_text(
+                f"✅ <b>Confirm Adding {len(pending)} Entry(s)</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"{lines}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                "Tap <b>Confirm</b> to save, or <b>Cancel</b> to abort.",
                 parse_mode=HTML,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Confirm", callback_data="fj_confirm"),
