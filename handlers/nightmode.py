@@ -97,8 +97,9 @@ def _night_deactivate_msg(sh: int, sm: int, eh: int, em: int) -> str:
 
 
 async def _set_permissions(chat_id: int, perms: dict) -> tuple[bool, str]:
+    # Try with independent permissions first (Bot API 7.0+)
     r = await bot_api("setChatPermissions", {
-        "chat_id":    chat_id,
+        "chat_id":     chat_id,
         "permissions": perms,
         "use_independent_chat_permissions": True,
     })
@@ -107,7 +108,35 @@ async def _set_permissions(chat_id: int, perms: dict) -> tuple[bool, str]:
     desc = r.get("description", "unknown error")
     if "CHAT_NOT_MODIFIED" in desc:
         return True, ""
-    return False, desc
+
+    # Fallback: try without use_independent_chat_permissions
+    # (for groups that don't support independent permissions)
+    lock_mode = not perms.get("can_send_messages", True)
+    simple_perms = {
+        "can_send_messages":         not lock_mode,
+        "can_send_audios":           not lock_mode,
+        "can_send_documents":        not lock_mode,
+        "can_send_photos":           not lock_mode,
+        "can_send_videos":           not lock_mode,
+        "can_send_video_notes":      not lock_mode,
+        "can_send_voice_notes":      not lock_mode,
+        "can_send_polls":            not lock_mode,
+        "can_send_other_messages":   not lock_mode,
+        "can_add_web_page_previews": not lock_mode,
+        "can_change_info":           False,
+        "can_invite_users":          not lock_mode,
+        "can_pin_messages":          False,
+    }
+    r2 = await bot_api("setChatPermissions", {
+        "chat_id":     chat_id,
+        "permissions": simple_perms,
+    })
+    if r2.get("ok"):
+        return True, ""
+    desc2 = r2.get("description", "unknown error")
+    if "CHAT_NOT_MODIFIED" in desc2:
+        return True, ""
+    return False, f"{desc} | fallback: {desc2}"
 
 
 @app.on_message(filters.command("nightmode") & filters.group)
@@ -226,6 +255,30 @@ async def nightmode_cmd(client: Client, message: Message):
 
     # ── ON ────────────────────────────────────────────────────────────────────
     if sub == "on":
+        # Verify bot has Restrict Members admin right before saving
+        try:
+            me = await client.get_me()
+            bot_member = await client.get_chat_member(message.chat.id, me.id)
+            from pyrogram.enums import ChatMemberStatus
+            if bot_member.status not in (
+                ChatMemberStatus.OWNER,
+                ChatMemberStatus.ADMINISTRATOR,
+            ) or not getattr(bot_member.privileges, "can_restrict_members", False):
+                await message.reply_text(
+                    "⚠️ <b>Bot Missing Admin Rights!</b>\n\n"
+                    "Night Mode requires the bot to be an admin with\n"
+                    "<b>Restrict Members</b> permission enabled.\n\n"
+                    "📌 Steps to fix:\n"
+                    "1️⃣ Go to group settings\n"
+                    "2️⃣ Promote the bot as admin\n"
+                    "3️⃣ Enable <b>Restrict Members</b>\n"
+                    "4️⃣ Try <code>/nightmode on</code> again",
+                    parse_mode=HTML,
+                )
+                return
+        except Exception as e:
+            print(f"[NIGHTMODE] Bot permission check error: {e}")
+
         if len(args) < 3:
             await message.reply_text(
                 "❌ Please provide start and end times.\n\n"
