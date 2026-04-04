@@ -1,4 +1,5 @@
 import asyncio
+import urllib.parse
 from datetime import datetime
 
 from pyrogram import Client, filters
@@ -199,6 +200,15 @@ async def start_handler(client: Client, message: Message):
             "━━━━━━━━━━━━━━━━━━━"
         )
 
+    _share_text = (
+        "░▒▓█ 🔥 DIAMOND BOT ACCESS 🔥 █▓▒░\n"
+        "🎬 Premium commands live now\n"
+        "💌 Click & Enter\n"
+        "✨ For true enthusiasts only\n\n"
+        f"https://t.me/{bot_username}?start=video"
+    )
+    _share_url = "https://t.me/share/url?text=" + urllib.parse.quote(_share_text, safe="")
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add Me To Group",
                               url=f"https://t.me/{bot_username}?startgroup=true")],
@@ -208,15 +218,7 @@ async def start_handler(client: Client, message: Message):
         ],
         [
             InlineKeyboardButton("💎 Buy Premium ✨", callback_data="open_buypremium"),
-            InlineKeyboardButton("📤 Share Bot",
-                                 url=(
-                                     f"https://t.me/share/url"
-                                     f"?url=https://t.me/{bot_username}%3Fstart%3Dvideo"
-                                     f"&text=%E2%96%91%E2%96%92%E2%96%93%E2%96%88%20%F0%9F%94%A5%20DIAMOND%20BOT%20ACCESS%20%F0%9F%94%A5%20%E2%96%88%E2%96%93%E2%96%92%E2%96%91%0A"
-                                     f"%F0%9F%8E%AC%20Premium%20commands%20live%20now%0A"
-                                     f"%F0%9F%92%8C%20Click%20%26%20Enter%0A"
-                                     f"%E2%9C%A8%20For%20true%20enthusiasts%20only"
-                                 )),
+            InlineKeyboardButton("📤 Share Bot",     url=_share_url),
         ],
     ])
     await message.reply_text(welcome_msg, reply_markup=keyboard)
