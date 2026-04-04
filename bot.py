@@ -8,6 +8,7 @@ import handlers  # noqa: F401 — registers all handlers via @app decorators
 from tasks import schedule_loop, video_del_loop
 from handlers.nightmode import nightmode_loop
 from handlers.stars_payment import stars_payment_loop
+from clone_manager import start_all_clones
 
 
 async def main():
@@ -35,6 +36,9 @@ async def main():
     loop.create_task(stars_payment_loop())
     loop.create_task(video_del_loop())
     print("[TASKS] Background loops started (schedule + nightmode + stars_payment + video_del).")
+
+    await start_all_clones()
+    print("[CLONE] Clone startup complete.")
 
     await pyrogram_idle()
     await app.stop()

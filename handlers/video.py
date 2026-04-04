@@ -10,7 +10,7 @@ from config import (
     users_col, videos_col, vid_hist_col, premium_col, del_queue_col,
     app,
 )
-from helpers import get_bot_username, log_event, bot_api
+from helpers import get_bot_username, log_event, bot_api, _bot_token_ctx, BOT_TOKEN
 
 
 async def _send_video_to_user(client: Client, user_id: int) -> str:
@@ -156,10 +156,12 @@ async def _send_video_to_user(client: Client, user_id: int) -> str:
         sent_msg_id = resp.get("result", {}).get("message_id")
         if sent_msg_id:
             delete_at = datetime.utcnow() + timedelta(seconds=1500)
+            bot_token = _bot_token_ctx.get()
             await del_queue_col.insert_one({
                 "chat_id":   user_id,
                 "msg_id":    sent_msg_id,
                 "delete_at": delete_at,
+                "token":     bot_token,
             })
             print(f"[VIDEO_DEL] Queued msg={sent_msg_id} user={user_id} at {delete_at.strftime('%H:%M:%S UTC')}")
     except Exception as e:

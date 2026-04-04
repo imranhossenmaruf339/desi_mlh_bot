@@ -29,6 +29,7 @@ conversations_col   = db["inbox_conversations"]
 groups_col          = db["bot_groups"]
 del_queue_col       = db["video_del_queue"]
 admins_col          = db["bot_admins"]
+clones_col          = db["bot_clones"]
 
 API_ID    = int(os.environ["TELEGRAM_API_ID"])
 API_HASH  = os.environ["TELEGRAM_API_HASH"]

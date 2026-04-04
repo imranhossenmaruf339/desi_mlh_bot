@@ -33,8 +33,13 @@ async def video_del_loop():
             for doc in due:
                 chat_id = doc["chat_id"]
                 msg_id  = doc["msg_id"]
+                token   = doc.get("token") or None
                 try:
-                    r = await bot_api("deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
+                    r = await bot_api(
+                        "deleteMessage",
+                        {"chat_id": chat_id, "message_id": msg_id},
+                        token=token,
+                    )
                     if r.get("ok"):
                         print(f"[VIDEO_DEL] ✅ Deleted msg={msg_id} user={chat_id}")
                     else:

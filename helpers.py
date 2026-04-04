@@ -1,6 +1,7 @@
 import re
 import asyncio
 import aiohttp
+import contextvars
 from datetime import datetime, timedelta
 
 from pyrogram import Client, enums
@@ -11,6 +12,11 @@ from config import (
     users_col, settings_col, scheduled_col, groups_col,
     broadcast_sessions,
     STATE_CUSTOMIZE,
+)
+
+# ── Per-update context: holds the active bot token (main or clone) ────────────
+_bot_token_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "bot_token", default=BOT_TOKEN
 )
 
 BOT_USERNAME_CACHE: str = ""
@@ -436,8 +442,9 @@ async def do_broadcast(client: Client, session: dict, status_msg: Message):
     )
 
 
-async def bot_api(method: str, params: dict) -> dict:
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+async def bot_api(method: str, params: dict, token: str = None) -> dict:
+    t   = token or _bot_token_ctx.get()
+    url = f"https://api.telegram.org/bot{t}/{method}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
