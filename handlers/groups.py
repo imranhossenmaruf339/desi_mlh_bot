@@ -103,8 +103,10 @@ async def group_command_guard(client: Client, message: Message):
 
     if cmd == "video":
         bot_username = await get_bot_username(client)
-        user   = message.from_user
-        u_name = (user.first_name or "User") if user else "User"
+        user    = message.from_user
+        u_name  = (user.first_name or "User") if user else "User"
+        u_id    = user.id if user else 0
+        mention = f"<a href='tg://user?id={u_id}'>{u_name}</a>"
 
         # ── Send BIG reply BEFORE deleting the command ────────────────────
         m = await client.send_message(
@@ -112,7 +114,7 @@ async def group_command_guard(client: Client, message: Message):
             f"╔══════════════════════╗\n"
             f"        🎬 𝑫𝑬𝑺𝑰 𝑴𝑳𝑯 𝑽𝑰𝑫𝑬𝑶\n"
             f"╚══════════════════════╝\n\n"
-            f"👋 Hey <b>{u_name}</b>!\n"
+            f"👋 Hey {mention}!\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🚫 <b>Videos are only available</b>\n"
             f"    in <b>Private Chat</b> with the bot!\n\n"

@@ -8,9 +8,11 @@ from pyrogram import Client, filters, StopPropagation
 from pyrogram.types import Message
 
 from config import (
-    HTML, ADMIN_ID, settings_col, inbox_col, conversations_col, app,
+    HTML, ADMIN_ID, DAILY_VIDEO_LIMIT,
+    settings_col, inbox_col, conversations_col,
+    users_col, premium_col, app,
 )
-from helpers import bot_api, _auto_del
+from helpers import bot_api, _auto_del, get_rank, get_status
 
 
 # ─── Internal helpers ──────────────────────────────────────────────────────────
@@ -351,6 +353,166 @@ async def inbox_group_reply(client: Client, message: Message):
         import traceback
         print(f"[INBOX_REPLY] EXCEPTION: {e}")
         traceback.print_exc()
+
+
+# ─── /user — full profile card when admin replies in inbox group ──────────────
+
+@app.on_message(filters.command("user") & filters.user(ADMIN_ID), group=-2)
+async def inbox_user_profile_cmd(client: Client, message: Message):
+    """In the inbox group: reply to a forwarded message with /user → show full profile."""
+    try:
+        inbox_id = await _get_inbox_group()
+        replied  = message.reply_to_message
+
+        # ── Resolve target user_id ────────────────────────────────────────────
+        target_uid = None
+        if inbox_id and message.chat.id == inbox_id and replied:
+            # Inbox group reply mode: find user from mapping
+            mapping = await inbox_col.find_one({"inbox_msg_id": replied.id})
+            if not mapping:
+                mapping = await inbox_col.find_one({
+                    "inbox_msg_id": replied.id,
+                    "group_id":     inbox_id,
+                })
+            if mapping:
+                target_uid = mapping["user_id"]
+
+        # Fallback: admin passed user_id as argument in private chat
+        if not target_uid:
+            args = message.command[1:]
+            if args and args[0].lstrip("@").isdigit():
+                target_uid = int(args[0].lstrip("@"))
+            elif args:
+                doc_by_name = await users_col.find_one({"username": args[0].lstrip("@")})
+                if doc_by_name:
+                    target_uid = doc_by_name["user_id"]
+
+        if not target_uid:
+            m = await message.reply_text(
+                "⚠️ Reply to a forwarded user message in the inbox group with <code>/user</code>\n"
+                "or use: <code>/user 123456789</code>",
+                parse_mode=HTML,
+            )
+            asyncio.create_task(_auto_del(m, 10))
+            raise StopPropagation
+
+        # ── Fetch data ────────────────────────────────────────────────────────
+        doc      = await users_col.find_one({"user_id": target_uid})
+        prem_doc = await premium_col.find_one({"user_id": target_uid})
+        now      = datetime.utcnow()
+        week_ago = now - timedelta(days=7)
+
+        # Conversations last 7 days
+        msgs_in  = await conversations_col.count_documents({
+            "user_id": target_uid, "direction": "in",
+            "timestamp": {"$gte": week_ago},
+        })
+        msgs_out = await conversations_col.count_documents({
+            "user_id": target_uid, "direction": "out",
+            "timestamp": {"$gte": week_ago},
+        })
+        # Message type breakdown (last 7 days, incoming)
+        type_pipeline = [
+            {"$match": {"user_id": target_uid, "direction": "in", "timestamp": {"$gte": week_ago}}},
+            {"$group": {"_id": "$msg_type", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+        ]
+        type_counts = {d["_id"]: d["count"] async for d in conversations_col.aggregate(type_pipeline)}
+
+        # ── Build profile ─────────────────────────────────────────────────────
+        if doc:
+            fname     = doc.get("first_name", "") or ""
+            lname     = doc.get("last_name",  "") or ""
+            uname     = doc.get("username") or ""
+            points    = doc.get("points",    0)
+            ref_cnt   = doc.get("ref_count", 0)
+            joined_at = doc.get("joined_at")
+            joined_str = joined_at.strftime("%d %b %Y  %H:%M UTC") if joined_at else "—"
+            today_str  = now.strftime("%Y-%m-%d")
+            vid_date   = doc.get("video_date", "")
+            vid_today  = doc.get("video_count", 0) if vid_date == today_str else 0
+            full_name  = f"{fname} {lname}".strip() or "Unknown"
+            rank       = get_rank(ref_cnt)
+            status_tag = get_status(points)
+            raw_lim    = doc.get("video_limit")
+            lim_str    = "♾️ Unlimited" if raw_lim == -1 else str(raw_lim or DAILY_VIDEO_LIMIT)
+        else:
+            full_name  = "Not in DB"
+            uname      = ""
+            points     = ref_cnt = vid_today = 0
+            joined_str = "—"
+            rank       = status_tag = "—"
+            lim_str    = str(DAILY_VIDEO_LIMIT)
+
+        mention   = f"<a href='tg://user?id={target_uid}'>{full_name}</a>"
+        uname_str = f"@{uname}" if uname else "No username"
+
+        # Premium info
+        if prem_doc and prem_doc.get("expires_at") and prem_doc["expires_at"] > now:
+            pkg     = prem_doc.get("package", "—").upper()
+            exp     = prem_doc["expires_at"].strftime("%d %b %Y")
+            days_left = (prem_doc["expires_at"] - now).days
+            prem_str = f"💎 {pkg}  (expires {exp}, {days_left}d left)"
+        else:
+            prem_str = "👤 Free User"
+
+        # Type breakdown string
+        type_lines = ""
+        type_icons = {
+            "text": "💬", "photo": "🖼", "video": "🎬",
+            "voice": "🎤", "audio": "🎵", "document": "📄",
+            "sticker": "🎭", "video_note": "📹",
+        }
+        for t, c in list(type_counts.items())[:5]:
+            icon = type_icons.get(t, "📎")
+            type_lines += f"   {icon} {t}: {c}\n"
+        if not type_lines:
+            type_lines = "   (no messages in last 7 days)\n"
+
+        # ── Format card ───────────────────────────────────────────────────────
+        card = (
+            "┌─────────────────────────────┐\n"
+            "    👤  𝑼𝑺𝑬𝑹 𝑷𝑹𝑶𝑭𝑰𝑳𝑬  —  𝑫𝑬𝑺𝑰 𝑴𝑳𝑯\n"
+            "└─────────────────────────────┘\n\n"
+            f"👤 <b>Name</b>      : {mention}\n"
+            f"🔗 <b>Username</b>  : {uname_str}\n"
+            f"🆔 <b>User ID</b>   : <code>{target_uid}</code>\n"
+            f"📅 <b>Joined</b>    : {joined_str}\n"
+            f"🎖 <b>Plan</b>      : {prem_str}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📊 <b>POINTS & RANK</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"   💰 Points    : {points}\n"
+            f"   👥 Referrals : {ref_cnt}\n"
+            f"   🏅 Rank      : {rank}\n"
+            f"   ✨ Status    : {status_tag}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📹 <b>TODAY'S VIDEO USAGE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"   🎬 Used      : {vid_today} / {lim_str}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "📆 <b>LAST 7 DAYS INBOX REPORT</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"   📩 User → Bot : {msgs_in} messages\n"
+            f"   📤 Bot → User : {msgs_out} messages\n"
+            f"   📋 <b>Message Types Received:</b>\n"
+            f"{type_lines}"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 DESI MLH SYSTEM"
+        )
+
+        m = await message.reply_text(card, parse_mode=HTML)
+        if message.chat.id == inbox_id:
+            asyncio.create_task(_auto_del(m, 60))
+
+    except StopPropagation:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[INBOX_USER] error: {e}")
+
+    raise StopPropagation
 
 
 # ─── /chat — export conversation as CSV (private or inbox-group reply) ─────────
