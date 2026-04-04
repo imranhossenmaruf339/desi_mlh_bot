@@ -17,11 +17,18 @@ from helpers import bot_api, _auto_del, get_rank, get_status, admin_filter, get_
 
 # ─── Internal helpers ──────────────────────────────────────────────────────────
 
-async def _get_inbox_group() -> int | None:
-    # Clone context wins; fall back to global settings_col
+async def _get_inbox_group(client=None) -> int | None:
+    """Get inbox group: clone's inbox_group wins over global settings."""
+    # Priority 1: client attribute (most reliable)
+    if client is not None:
+        cfg = getattr(client, "_clone_config", None)
+        if cfg and cfg.get("inbox_group"):
+            return cfg["inbox_group"]
+    # Priority 2: ContextVar (set by injector)
     clone_ig = get_cfg("inbox_group")
     if clone_ig:
         return clone_ig
+    # Priority 3: global settings_col
     doc = await settings_col.find_one({"key": "inbox_group"})
     return doc.get("chat_id") if doc else None
 
@@ -122,7 +129,7 @@ async def set_inbox_group_cmd(client: Client, message: Message):
     args = message.command[1:]
 
     if not args:
-        inbox_id = await _get_inbox_group()
+        inbox_id = await _get_inbox_group(client)
         if inbox_id:
             await message.reply_text(
                 f"📥 <b>Inbox Group</b>\n"
@@ -182,11 +189,15 @@ async def user_msg_to_inbox(client: Client, message: Message):
     user = message.from_user
     if not user or user.id == ADMIN_ID:
         return
+    # Skip clone admins (they use commands, not inbox)
+    cfg = getattr(client, "_clone_config", None)
+    if cfg and user.id == cfg.get("admin_id"):
+        return
     text = message.text or message.caption or ""
     if text.startswith("/"):
         return
 
-    inbox_id = await _get_inbox_group()
+    inbox_id = await _get_inbox_group(client)
     if not inbox_id:
         return
 
@@ -223,7 +234,7 @@ async def user_msg_to_inbox(client: Client, message: Message):
 @app.on_message(filters.group & filters.incoming, group=11)
 async def inbox_group_reply(client: Client, message: Message):
     try:
-        inbox_id = await _get_inbox_group()
+        inbox_id = await _get_inbox_group(client)
         if not inbox_id:
             return
         if message.chat.id != inbox_id:
@@ -375,7 +386,7 @@ async def inbox_group_reply(client: Client, message: Message):
 async def inbox_user_profile_cmd(client: Client, message: Message):
     """In the inbox group: reply to a forwarded message with /user → show full profile."""
     try:
-        inbox_id = await _get_inbox_group()
+        inbox_id = await _get_inbox_group(client)
         replied  = message.reply_to_message
 
         # ── Resolve target user_id ────────────────────────────────────────────
@@ -543,7 +554,7 @@ async def chat_export_cmd(client: Client, message: Message):
         # Method 1: admin replies to a forwarded message in inbox group with /chat
         replied = message.reply_to_message
         if replied and message.chat.type.name != "PRIVATE":
-            inbox_id = await _get_inbox_group()
+            inbox_id = await _get_inbox_group(client)
             print(f"[CHAT] group reply mode  inbox_id={inbox_id}  replied_to={replied.id}")
             if inbox_id and message.chat.id == inbox_id:
                 mapping = await inbox_col.find_one({
