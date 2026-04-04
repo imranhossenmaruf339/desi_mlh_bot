@@ -1,5 +1,6 @@
 import asyncio
 
+import aiohttp
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -7,6 +8,42 @@ from config import (
     HTML, ADMIN_ID, settings_col, fj_sessions, app,
 )
 from helpers import log_event, admin_filter, _clone_config_ctx, BOT_TOKEN
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Low-level Bot API helper (for membership checks when Pyrogram can't access)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fj_token(client) -> str:
+    cfg = getattr(client, "_clone_config", None) or _clone_config_ctx.get()
+    if cfg and cfg.get("token"):
+        return cfg["token"]
+    return BOT_TOKEN
+
+
+async def _bot_api_check_member(client: Client, chat_id, user_id: int):
+    """Check membership via Bot API getChatMember.
+
+    Returns:
+        True  — user is a member / admin / owner / restricted
+        False — user is NOT in the chat (left or kicked)
+        None  — bot cannot determine (not admin, chat inaccessible, etc.)
+    """
+    token = _fj_token(client)
+    url   = f"https://api.telegram.org/bot{token}/getChatMember"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json={"chat_id": chat_id, "user_id": user_id}) as resp:
+                data = await resp.json()
+        if not data.get("ok"):
+            desc = data.get("description", "")
+            print(f"[FJ] getChatMember API error for {chat_id}: {desc}")
+            return None
+        status = data.get("result", {}).get("status", "")
+        return status in ("member", "administrator", "creator", "restricted")
+    except Exception as e:
+        print(f"[FJ] getChatMember API exception for {chat_id}: {e}")
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -55,36 +92,96 @@ async def get_fj_channels(client=None) -> list:
 async def get_not_joined(client: Client, user_id: int, channels: list) -> list:
     """Return channels the user has NOT fully joined.
 
-    Only checks membership status — NEVER approves any join request.
-    A user with a pending join request is treated as NOT joined until
-    the channel admin manually approves them.
+    Check order:
+      1. Pyrogram get_chat_member  (fast; needs bot to be admin in the chat)
+      2. Bot API getChatMember     (fallback when Pyrogram raises non-participant errors)
 
-    Statuses counted as JOINED: OWNER, ADMINISTRATOR, MEMBER, RESTRICTED.
-    Everything else (LEFT, BANNED, any exception) → NOT joined.
+    Invite links stored as chat_id are resolved to numeric IDs first.
+
+    Only UserNotParticipant / left / kicked → "not joined".
+    If neither method can determine membership (bot not admin, chat inaccessible),
+    the channel is skipped to avoid permanently locking out legitimate users.
+    Admins must ensure the bot is an admin in every force-join target.
     """
     from pyrogram import enums
+    from pyrogram.errors import (
+        UserNotParticipant, ChannelPrivate, PeerIdInvalid,
+        ChannelInvalid, UsernameInvalid, UsernameNotOccupied,
+        ChatAdminRequired,
+    )
+
     _JOINED = {
         enums.ChatMemberStatus.OWNER,
         enums.ChatMemberStatus.ADMINISTRATOR,
         enums.ChatMemberStatus.MEMBER,
-        enums.ChatMemberStatus.RESTRICTED,   # in chat but restricted — still a member
+        enums.ChatMemberStatus.RESTRICTED,
     }
+    # Bot API statuses that count as "in the chat"
+    _API_JOINED = {"member", "administrator", "creator", "restricted"}
 
     not_joined = []
     for ch in channels:
         raw_cid = ch.get("chat_id", "")
-        try:
-            cid = int(raw_cid) if str(raw_cid).lstrip("-").isdigit() else str(raw_cid)
-        except Exception:
-            cid = str(raw_cid)
+        name    = ch.get("name", str(raw_cid))
+
+        # ── Step 0: resolve invite links → numeric ID ──────────────────────
+        # Pyrogram cannot use t.me/+ invite links in get_chat_member.
+        if isinstance(raw_cid, str) and ("t.me/+" in raw_cid or
+                (raw_cid.startswith("http") and "+" in raw_cid)):
+            try:
+                chat_obj = await client.get_chat(raw_cid)
+                cid      = chat_obj.id
+                print(f"[FJ] Resolved invite link → {cid} for '{name}'")
+            except Exception as e:
+                print(f"[FJ] Cannot resolve invite link for '{name}': {e} — using Bot API")
+                # Bot API also accepts invite links in some cases
+                api_ok = await _bot_api_check_member(client, raw_cid, user_id)
+                if api_ok is False:
+                    not_joined.append(ch)
+                elif api_ok is None:
+                    # Can't verify at all — warn admin, don't block user
+                    print(f"[FJ] ⚠️ SETUP ISSUE: '{name}' — bot cannot check membership. "
+                          "Add bot as admin OR provide a numeric group ID.")
+                continue
+        else:
+            try:
+                cid = int(raw_cid) if str(raw_cid).lstrip("-").isdigit() else str(raw_cid)
+            except Exception:
+                cid = str(raw_cid)
+
+        # ── Step 1: Pyrogram get_chat_member ───────────────────────────────
         try:
             member = await client.get_chat_member(cid, user_id)
             if member.status not in _JOINED:
                 not_joined.append(ch)
-        except Exception:
-            # UserNotParticipant, ChannelPrivate, PeerIdInvalid, or
-            # any other error → treat as not joined (safe fallback).
+            # else: user IS joined → do nothing
+            continue
+        except UserNotParticipant:
+            # User is definitively NOT in the chat
             not_joined.append(ch)
+            continue
+        except (ChannelPrivate, PeerIdInvalid, ChannelInvalid,
+                UsernameInvalid, UsernameNotOccupied) as e:
+            print(f"[FJ] Chat unreachable for '{name}' ({cid}): {e} — trying Bot API")
+        except ChatAdminRequired as e:
+            print(f"[FJ] Bot not admin in '{name}' ({cid}): {e} — trying Bot API")
+        except Exception as e:
+            print(f"[FJ] get_chat_member error for '{name}' ({cid}): {e} — trying Bot API")
+
+        # ── Step 2: Bot API getChatMember fallback ─────────────────────────
+        api_result = await _bot_api_check_member(client, cid, user_id)
+        if api_result is False:
+            # Bot API confirmed user is NOT in the chat
+            not_joined.append(ch)
+        elif api_result is True:
+            # Bot API confirmed user IS in the chat
+            pass
+        else:
+            # None — bot cannot verify (not admin anywhere)
+            print(f"[FJ] ⚠️ SETUP ISSUE: '{name}' ({cid}) — bot cannot check membership. "
+                  "Ensure the bot is an ADMIN in this group/channel!")
+            # Don't add to not_joined — skip this check to avoid locking out users
+
     return not_joined
 
 
