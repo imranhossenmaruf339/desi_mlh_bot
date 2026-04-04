@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import io
 import re
 from datetime import datetime, timedelta
@@ -82,27 +83,22 @@ def _is_date_arg(arg: str) -> bool:
     return bool(re.match(r"^\d{4}[/-]\d{2}[/-]\d{2}$|^\d{2}[/-]\d{2}[/-]\d{4}$", arg))
 
 
-def _format_conversations(docs: list, title: str) -> str:
-    if not docs:
-        return f"{title}\n\nNo messages found."
-    lines = [title, "=" * 60, ""]
-    current_uid = None
+def _to_csv_bytes(docs: list) -> bytes:
+    """Convert conversation docs to CSV bytes."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["timestamp", "user_id", "user_name", "username", "direction", "type", "content"])
     for doc in sorted(docs, key=lambda d: d.get("timestamp", datetime.min)):
-        uid      = doc.get("user_id")
-        name     = doc.get("user_name", "Unknown")
-        uname    = f"@{doc['username']}" if doc.get("username") else "no username"
-        ts       = doc.get("timestamp", datetime.utcnow()).strftime("%Y-%m-%d %H:%M UTC")
-        direction = doc.get("direction", "in")
-        content   = doc.get("content", "")
-        if uid != current_uid:
-            current_uid = uid
-            lines.append(f"\n{'─' * 50}")
-            lines.append(f"👤 {name}  ({uname})  |  ID: {uid}")
-            lines.append("─" * 50)
-        prefix = "   ADMIN ➤" if direction == "out" else f"   {name} ➤"
-        lines.append(f"  [{ts}]  {prefix}  {content}")
-    lines += ["", "=" * 60, f"Total: {len(docs)} messages"]
-    return "\n".join(lines)
+        writer.writerow([
+            doc.get("timestamp", datetime.utcnow()).strftime("%Y-%m-%d %H:%M:%S"),
+            doc.get("user_id", ""),
+            doc.get("user_name", ""),
+            doc.get("username", ""),
+            doc.get("direction", ""),
+            doc.get("msg_type", ""),
+            doc.get("content", ""),
+        ])
+    return buf.getvalue().encode("utf-8-sig")
 
 
 # ─── /setinboxgroup ────────────────────────────────────────────────────────────
@@ -225,6 +221,11 @@ async def inbox_group_reply(client: Client, message: Message):
         if not sender_id:
             return
 
+        # Skip bot commands — they're handled by their own handlers
+        raw_text = message.text or message.caption or ""
+        if raw_text.startswith("/"):
+            return
+
         mapping = await inbox_col.find_one({
             "inbox_msg_id": replied.id,
             "group_id":     inbox_id,
@@ -286,34 +287,66 @@ async def inbox_group_reply(client: Client, message: Message):
         print(f"[INBOX] inbox_group_reply error: {e}")
 
 
-# ─── /chat {user_id | @username} — export full conversation as file ───────────
+# ─── /chat — export conversation as CSV ──────────────────────────────────────
+# Works in two ways:
+#   1. Private chat:  /chat {user_id}  or  /chat @username
+#   2. Inbox group:   reply to a forwarded message with /chat  (no args needed)
 
 @app.on_message(filters.command("chat") & filters.user(ADMIN_ID))
 async def chat_export_cmd(client: Client, message: Message):
     args = message.command[1:]
-    if not args:
-        await message.reply_text(
-            "📤 <b>Export conversation with a user</b>\n\n"
-            "Usage:\n"
-            "<code>/chat {user_id}</code>\n"
-            "<code>/chat @username</code>",
-            parse_mode=HTML,
-        )
-        return
+    user_id   = None
+    user_name = ""
+    username  = ""
 
-    raw = args[0].lstrip("@")
-    user_id = None
+    # ── Method 1: reply to forwarded message in inbox group ──────────────────
+    replied = message.reply_to_message
+    if replied and message.chat.type.name != "PRIVATE":
+        inbox_id = await _get_inbox_group()
+        if inbox_id and message.chat.id == inbox_id:
+            mapping = await inbox_col.find_one({
+                "inbox_msg_id": replied.id,
+                "group_id":     inbox_id,
+            })
+            if mapping:
+                user_id   = mapping["user_id"]
+                user_name = mapping.get("user_name", str(user_id))
+                username  = mapping.get("username", "")
+            else:
+                await message.reply_text(
+                    "❌ Could not identify user from this message.\n"
+                    "Make sure you're replying to a <b>forwarded user message</b>.",
+                    parse_mode=HTML,
+                )
+                return
 
-    if raw.isdigit():
-        user_id = int(raw)
-    else:
-        doc = await conversations_col.find_one({"username": raw})
-        if doc:
-            user_id = doc["user_id"]
+    # ── Method 2: explicit user_id or @username ───────────────────────────────
+    if not user_id:
+        if not args:
+            await message.reply_text(
+                "📤 <b>Export conversation</b>\n\n"
+                "<b>Option 1 — In inbox group:</b>\n"
+                "Reply to any forwarded user message with <code>/chat</code>\n\n"
+                "<b>Option 2 — In private:</b>\n"
+                "<code>/chat {user_id}</code>\n"
+                "<code>/chat @username</code>",
+                parse_mode=HTML,
+            )
+            return
+
+        raw = args[0].lstrip("@")
+        if raw.isdigit():
+            user_id = int(raw)
+        else:
+            doc = await conversations_col.find_one({"username": raw})
+            if doc:
+                user_id   = doc["user_id"]
+                user_name = doc.get("user_name", "")
+                username  = doc.get("username", "")
 
     if not user_id:
         await message.reply_text(
-            f"❌ User not found: <code>{raw}</code>\n\n"
+            f"❌ User not found: <code>{args[0] if args else '?'}</code>\n\n"
             "Make sure the user has sent a message to the bot.",
             parse_mode=HTML,
         )
@@ -322,28 +355,29 @@ async def chat_export_cmd(client: Client, message: Message):
     docs = await conversations_col.find({"user_id": user_id}).sort("timestamp", 1).to_list(length=None)
     if not docs:
         await message.reply_text(
-            f"📭 No conversation found with <code>{user_id}</code>.",
+            f"📭 No conversation history for <code>{user_id}</code>.",
             parse_mode=HTML,
         )
         return
 
-    name  = docs[0].get("user_name", str(user_id))
-    uname = f"@{docs[0]['username']}" if docs[0].get("username") else "no username"
-    title = (
-        f"Conversation: {name} ({uname})  |  ID: {user_id}\n"
-        f"Exported: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
-    )
-    text = _format_conversations(docs, title)
-    buf  = io.BytesIO(text.encode("utf-8"))
-    buf.name = f"chat_{user_id}.txt"
+    if not user_name:
+        user_name = docs[0].get("user_name", str(user_id))
+    if not username:
+        username  = docs[0].get("username", "")
+
+    uname_display = f"@{username}" if username else "no username"
+
+    csv_bytes = _to_csv_bytes(docs)
+    buf = io.BytesIO(csv_bytes)
+    buf.name = f"chat_{user_id}.csv"
 
     await message.reply_document(
         document=buf,
         caption=(
             f"💬 <b>Conversation Export</b>\n"
-            f"👤 {name}  ({uname})\n"
+            f"👤 {user_name}  ({uname_display})\n"
             f"🆔 <code>{user_id}</code>\n"
-            f"📨 {len(docs)} messages total"
+            f"📨 {len(docs)} messages"
         ),
         parse_mode=HTML,
     )
@@ -495,19 +529,17 @@ async def inbox_cmd(client: Client, message: Message):
         )
         return
 
-    title = (
-        f"Inbox Export — {title_suffix}\n"
-        f"Exported: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
-    )
-    text = _format_conversations(docs, title)
-    buf  = io.BytesIO(text.encode("utf-8"))
-    buf.name = f"inbox_{period_arg}.txt"
+    csv_bytes = _to_csv_bytes(docs)
+    safe_name = re.sub(r"[^\w\-]", "_", period_arg)
+    buf = io.BytesIO(csv_bytes)
+    buf.name = f"inbox_{safe_name}.csv"
 
     await message.reply_document(
         document=buf,
         caption=(
             f"📥 <b>Inbox Export</b>  —  {title_suffix}\n"
-            f"📨 {len(docs)} messages"
+            f"📨 {len(docs)} messages\n"
+            f"📅 Exported: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
         ),
         parse_mode=HTML,
     )
