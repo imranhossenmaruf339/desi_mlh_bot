@@ -5,7 +5,8 @@ from pyrogram import idle as pyrogram_idle
 from config import app, VIDEO_CHANNEL
 from helpers import get_log_channel
 import handlers  # noqa: F401 — registers all handlers via @app decorators
-from tasks import schedule_loop, nightmode_loop
+from tasks import schedule_loop
+from handlers.nightmode import nightmode_loop
 
 
 async def main():
