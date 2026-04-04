@@ -211,25 +211,56 @@ def _kb_to_json(reply_markup) -> dict | None:
     return {"inline_keyboard": rows}
 
 
+class _FakeMsg:
+    """Minimal message-like object returned by bot_api calls."""
+    __slots__ = ("id",)
+    def __init__(self, msg_id):
+        self.id = msg_id
+
+
 async def _send_media(client: Client, chat_id: int, session: dict,
                       caption=None, caption_entities=None, reply_markup=None):
-    """Send media via Bot API directly — avoids Pyrogram version quirks."""
-    file_id    = session.get("file_id")
-    media_kind = session.get("media_kind", "document")
+    """
+    Send media via Bot API directly — avoids ALL Pyrogram version quirks.
 
-    print(f"[_send_media] chat={chat_id} kind={media_kind} fid={bool(file_id)} cap={bool(caption)}")
+    Strategy (most-to-least reliable):
+      1. copyMessage  — when from_chat_id + message_id are known (immediate broadcast)
+      2. sendPhoto / sendVideo / … — using stored file_id (scheduled broadcast)
+    """
+    from_chat_id = session.get("media_chat_id")
+    msg_id       = session.get("media_msg_id")
+    file_id      = session.get("file_id")
+    media_kind   = session.get("media_kind", "document")
 
-    if not file_id:
-        # Fallback: copy_message (old path)
-        return await client.copy_message(
-            chat_id=chat_id,
-            from_chat_id=session["media_chat_id"],
-            message_id=session["media_msg_id"],
-            caption=caption,
-            reply_markup=reply_markup,
-        )
+    print(f"[_send_media] chat={chat_id} kind={media_kind} "
+          f"fid={bool(file_id)} copy={bool(from_chat_id and msg_id)} cap={bool(caption)}")
 
     kb_json = _kb_to_json(reply_markup)
+
+    # ── PATH 1: copyMessage (most reliable, works for ALL media types) ────────
+    if from_chat_id and msg_id:
+        params: dict = {
+            "chat_id":      chat_id,
+            "from_chat_id": from_chat_id,
+            "message_id":   msg_id,
+        }
+        # Only override caption if we have something to say
+        if caption:
+            params["caption"] = caption
+        if kb_json:
+            params["reply_markup"] = kb_json
+
+        resp = await bot_api("copyMessage", params)
+        if resp.get("ok"):
+            result = resp.get("result", {})
+            return _FakeMsg(result.get("message_id"))
+        else:
+            print(f"[_send_media] copyMessage failed ({resp.get('description')}), trying sendFile...")
+            # fall through to PATH 2
+
+    # ── PATH 2: sendPhoto / sendVideo / … using file_id ──────────────────────
+    if not file_id:
+        raise RuntimeError("No media source: media_chat_id/msg_id unavailable and file_id missing")
 
     method_map = {
         "photo":      ("sendPhoto",      "photo"),
@@ -241,25 +272,20 @@ async def _send_media(client: Client, chat_id: int, session: dict,
         "sticker":    ("sendSticker",    "sticker"),
         "video_note": ("sendVideoNote",  "video_note"),
     }
-
     if media_kind not in method_map:
         media_kind = "document"
 
     api_method, field_name = method_map[media_kind]
     params = {"chat_id": chat_id, field_name: file_id}
-
-    # caption supported for most media types (not sticker/video_note)
     if media_kind not in ("sticker", "video_note") and caption:
         params["caption"] = caption
-
     if kb_json:
         params["reply_markup"] = kb_json
 
     resp = await bot_api(api_method, params)
     if resp.get("ok"):
-        # Return a minimal object with .id so preview_msg_id can be set
         result = resp.get("result", {})
-        return type("FakeMsg", (), {"id": result.get("message_id")})()
+        return _FakeMsg(result.get("message_id"))
     else:
         raise RuntimeError(f"Bot API {api_method} failed: {resp.get('description', 'unknown')}")
 
@@ -356,7 +382,8 @@ async def do_broadcast(client: Client, session: dict, status_msg: Message):
         try:
             await send_to_user(client, uid, session, reply_markup=extra_kb)
             sent += 1
-        except Exception:
+        except Exception as _err:
+            print(f"[BROADCAST] uid={uid} FAILED: {_err}")
             failed += 1
 
         now = asyncio.get_event_loop().time()

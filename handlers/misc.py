@@ -228,6 +228,10 @@ async def admin_message_handler(client: Client, message: Message):
     session = broadcast_sessions.get(ADMIN_ID)
     fj      = fj_sessions.get(ADMIN_ID)
     text_in = (message.text or "").strip()
+    print(f"[ADMIN_MSG] photo={bool(message.photo)} video={bool(message.video)} "
+          f"doc={bool(message.document)} text={bool(message.text)} "
+          f"caption={bool(message.caption)} "
+          f"sess_state={session.get('state') if session else 'NONE'} fj={bool(fj)}")
 
     if fj:
         state = fj.get("state")
@@ -371,47 +375,60 @@ async def admin_message_handler(client: Client, message: Message):
         return
 
     if state == STATE_CONTENT:
-        if has_media(message):
-            session["msg_type"]      = "media"
-            session["media_chat_id"] = message.chat.id
-            session["media_msg_id"]  = message.id
-            if message.caption:
-                session["text"]     = message.caption
-                session["entities"] = message.caption_entities or []
-            # Extract file_id and media_kind for reliable delivery
-            if message.photo:
-                session["file_id"]    = message.photo.file_id
-                session["media_kind"] = "photo"
-            elif message.video:
-                session["file_id"]    = message.video.file_id
-                session["media_kind"] = "video"
-            elif message.animation:
-                session["file_id"]    = message.animation.file_id
-                session["media_kind"] = "animation"
-            elif message.document:
-                session["file_id"]    = message.document.file_id
-                session["media_kind"] = "document"
-            elif message.audio:
-                session["file_id"]    = message.audio.file_id
-                session["media_kind"] = "audio"
-            elif message.voice:
-                session["file_id"]    = message.voice.file_id
-                session["media_kind"] = "voice"
-            elif message.sticker:
-                session["file_id"]    = message.sticker.file_id
-                session["media_kind"] = "sticker"
-            elif message.video_note:
-                session["file_id"]    = message.video_note.file_id
-                session["media_kind"] = "video_note"
-            session["state"] = STATE_CUSTOMIZE
-        else:
-            session["msg_type"] = "text"
-            session["text"]     = message.text or ""
-            session["entities"] = message.entities or []
-            session["state"]    = STATE_CUSTOMIZE
+        print(f"[STATE_CONTENT] has_media={has_media(message)}")
+        try:
+            if has_media(message):
+                session["msg_type"]      = "media"
+                session["media_chat_id"] = message.chat.id
+                session["media_msg_id"]  = message.id
+                if message.caption:
+                    session["text"]     = message.caption
+                    session["entities"] = message.caption_entities or []
+                # Extract file_id and media_kind for reliable delivery
+                if message.photo:
+                    session["file_id"]    = message.photo.file_id
+                    session["media_kind"] = "photo"
+                elif message.video:
+                    session["file_id"]    = message.video.file_id
+                    session["media_kind"] = "video"
+                elif message.animation:
+                    session["file_id"]    = message.animation.file_id
+                    session["media_kind"] = "animation"
+                elif message.document:
+                    session["file_id"]    = message.document.file_id
+                    session["media_kind"] = "document"
+                elif message.audio:
+                    session["file_id"]    = message.audio.file_id
+                    session["media_kind"] = "audio"
+                elif message.voice:
+                    session["file_id"]    = message.voice.file_id
+                    session["media_kind"] = "voice"
+                elif message.sticker:
+                    session["file_id"]    = message.sticker.file_id
+                    session["media_kind"] = "sticker"
+                elif message.video_note:
+                    session["file_id"]    = message.video_note.file_id
+                    session["media_kind"] = "video_note"
+                print(f"[STATE_CONTENT] fid={session.get('file_id','NONE')[:20] if session.get('file_id') else 'NONE'} kind={session.get('media_kind')}")
+                session["state"] = STATE_CUSTOMIZE
+            else:
+                session["msg_type"] = "text"
+                session["text"]     = message.text or ""
+                session["entities"] = message.entities or []
+                session["state"]    = STATE_CUSTOMIZE
 
-        from helpers import kb_customize
-        await refresh_preview(client, session)
+            from helpers import kb_customize
+            print("[STATE_CONTENT] calling refresh_preview...")
+            await refresh_preview(client, session)
+            print("[STATE_CONTENT] refresh_preview done")
+        except Exception as exc:
+            import traceback
+            print(f"[STATE_CONTENT] EXCEPTION: {exc}")
+            traceback.print_exc()
+            try:
+                await message.reply_text(f"⚠️ Error: <code>{exc}</code>", parse_mode="html")
+            except Exception:
+                pass
         return
 
     if state == STATE_BUTTONS:
