@@ -15,6 +15,15 @@ async def main():
     print("Bot is starting...")
     await app.start()
 
+    # Cache main bot's own user ID (needed for clone priority guard)
+    import config as _cfg
+    try:
+        _me = await app.get_me()
+        _cfg.MAIN_BOT_ID = _me.id
+        print(f"[STARTUP] Main bot ID cached: {_cfg.MAIN_BOT_ID}")
+    except Exception as e:
+        print(f"[STARTUP] WARNING: Could not get main bot ID: {e}")
+
     # Cache important peer IDs so "Peer id invalid" never happens
     try:
         await app.get_chat(VIDEO_CHANNEL)
