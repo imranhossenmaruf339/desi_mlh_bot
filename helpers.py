@@ -34,7 +34,11 @@ async def log_event(client: Client, text: str):
         cid = await get_log_channel()
         if cid:
             now = datetime.utcnow().strftime("%Y-%m-%d %H:%M") + " UTC"
-            await client.send_message(cid, f"🗒 <b>LOG</b> | {now}\n\n{text}", parse_mode=HTML)
+            await bot_api("sendMessage", {
+                "chat_id":    cid,
+                "text":       f"🗒 <b>LOG</b> | {now}\n\n{text}",
+                "parse_mode": "HTML",
+            })
     except Exception as e:
         print(f"[LOG_EVENT] Failed: {e}")
 
