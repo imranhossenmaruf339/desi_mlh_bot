@@ -1,10 +1,11 @@
 import asyncio
+import urllib.parse
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import HTML, ADMIN_ID, welcome_col, rules_col, app
-from helpers import log_event, _is_admin_msg, _auto_del
+from helpers import log_event, _is_admin_msg, _auto_del, get_bot_username
 
 
 @app.on_message(filters.command("welcome") & filters.group)
@@ -71,9 +72,10 @@ async def welcome_cmd(client: Client, message: Message):
 
 @app.on_message(filters.new_chat_members, group=5)
 async def welcome_new_member(client: Client, message: Message):
-    chat_id     = message.chat.id
-    doc         = await welcome_col.find_one({"chat_id": chat_id})
-    group_title = message.chat.title or "the group"
+    chat_id      = message.chat.id
+    doc          = await welcome_col.find_one({"chat_id": chat_id})
+    group_title  = message.chat.title or "the group"
+    bot_username = await get_bot_username(client)
 
     for user in message.new_chat_members:
         if user.is_bot:
@@ -81,44 +83,66 @@ async def welcome_new_member(client: Client, message: Message):
 
         name = user.first_name or "User"
 
-        # ── Group welcome (custom or default) ────────────────────────────────
-        if doc and doc.get("enabled"):
-            template = doc.get("text", "Welcome {name} to {group}!")
+        # ── Build welcome text ─────────────────────────────────────────────────
+        if doc and doc.get("enabled") and doc.get("text"):
+            # Admin set a custom template → use it
+            template = doc["text"]
             grp_text = template.replace("{name}", name).replace("{group}", group_title)
         else:
+            # Default: same style as /start welcome message
             grp_text = (
-                f"👋 Welcome, <b>{name}</b>!\n\n"
-                f"Glad to have you in <b>{group_title}</b>. "
-                f"Feel free to start chatting! 🎉"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "✨🎬  𝑾𝑬𝑳𝑪𝑶𝑴𝑬 𝑻𝑶 𝑫𝑬𝑺𝑰 𝑴𝑳𝑯 🎬✨\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                f"👑 Welcome <b>{name}</b>! 👑\n"
+                f"You are now a member of <b>{group_title}</b> 🎥\n\n"
+                "🔥 To watch videos, use the command:\n"
+                "👉 /video\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "📜 GROUP RULES\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "✅ Be respectful to all members\n"
+                "✅ No spam or self-promotion\n"
+                "✅ No illegal content\n"
+                "✅ Follow admin instructions\n"
+                "⚠️ Rule violation = Instant remove\n"
+                "━━━━━━━━━━━━━━━━━━━\n"
+                "🎬 Stay Active | Enjoy Watching\n"
+                "— 🤖 𝑫𝑬𝑺𝑰 𝑴𝑳𝑯 𝑩𝒐𝒕\n"
+                "━━━━━━━━━━━━━━━━━━━"
             )
 
+        # ── Build buttons (same style as /start, adapted for group) ───────────
+        _share_text = (
+            "░▒▓█ 🔥 DIAMOND BOT ACCESS 🔥 █▓▒░\n\n"
+            "🎬 Premium commands live now\n\n"
+            "💌 Click & Enter\n\n"
+            "✨ For true enthusiasts only\n\n"
+            f"https://t.me/{bot_username}?start=video"
+        )
+        _share_url = "https://t.me/share/url?text=" + urllib.parse.quote(_share_text, safe="")
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("🤖 Start Bot",    url=f"https://t.me/{bot_username}?start=video"),
+                InlineKeyboardButton("👑 VIP Channel",  url="https://t.me/+qFuMDi1eB7AxZGU1"),
+            ],
+            [
+                InlineKeyboardButton("💎 Buy Premium ✨", url=f"https://t.me/{bot_username}?start=buypremium"),
+                InlineKeyboardButton("📤 Share Bot",     url=_share_url),
+            ],
+        ])
+
+        # ── Send in group (with auto-delete) ──────────────────────────────────
         try:
-            m = await client.send_message(chat_id, grp_text, parse_mode=HTML)
+            m = await client.send_message(
+                chat_id, grp_text,
+                parse_mode=HTML,
+                reply_markup=keyboard,
+            )
             asyncio.create_task(_auto_del(m, 120))
         except Exception as e:
             print(f"[WELCOME] Group msg failed: {e}")
-
-        # ── DM welcome ────────────────────────────────────────────────────────
-        try:
-            bot_username = ""
-            try:
-                me = await client.get_me()
-                bot_username = me.username or ""
-            except Exception:
-                pass
-
-            dm_text = (
-                f"👋 <b>Welcome to {group_title}, {name}!</b>\n\n"
-                f"I'm the group assistant bot. Here's what I can do for you:\n\n"
-                f"🎬 <b>/video</b> — Watch exclusive videos\n"
-                f"🎁 <b>/daily</b> — Claim daily bonus\n"
-                f"💎 <b>/buypremium</b> — Unlock premium features\n"
-                f"👤 <b>/profile</b> — View your profile\n\n"
-                f"Type /start to register and get full access!"
-            )
-            await client.send_message(user.id, dm_text, parse_mode=HTML)
-        except Exception:
-            pass  # user hasn't started the bot yet — silent fail is correct
 
 
 @app.on_message(filters.command("setrules") & filters.group)
