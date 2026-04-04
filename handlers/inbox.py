@@ -59,7 +59,7 @@ async def _save_msg(
         "user_id":   user_id,
         "user_name": user_name,
         "username":  username,
-        "direction": direction,   # "in" = user→bot  |  "out" = admin→user
+        "direction": direction,
         "content":   content,
         "msg_type":  msg_type,
         "timestamp": datetime.utcnow(),
@@ -67,7 +67,6 @@ async def _save_msg(
 
 
 def _parse_period(arg: str) -> datetime | None:
-    """Parse '7_days', '2024-01-15', '15-01-2024' → cutoff datetime."""
     m = re.match(r"^(\d+)_days?$", arg, re.IGNORECASE)
     if m:
         return datetime.utcnow() - timedelta(days=int(m.group(1)))
@@ -84,7 +83,6 @@ def _is_date_arg(arg: str) -> bool:
 
 
 def _to_csv_bytes(docs: list) -> bytes:
-    """Convert conversation docs to CSV bytes."""
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(["timestamp", "user_id", "user_name", "username", "direction", "type", "content"])
@@ -204,7 +202,7 @@ async def user_msg_to_inbox(client: Client, message: Message):
         print(f"[INBOX] user_msg_to_inbox error: {e}")
 
 
-# ─── Admin reply in inbox group → send to user + react ✅ ────────────────────
+# ─── Admin reply in inbox group → send to user + react 👍 ────────────────────
 
 @app.on_message(filters.group & filters.incoming, group=11)
 async def inbox_group_reply(client: Client, message: Message):
@@ -221,7 +219,7 @@ async def inbox_group_reply(client: Client, message: Message):
         if not sender_id:
             return
 
-        # Skip bot commands — they're handled by their own handlers
+        # Skip bot commands — handled by their own handlers
         raw_text = message.text or message.caption or ""
         if raw_text.startswith("/"):
             return
@@ -234,8 +232,8 @@ async def inbox_group_reply(client: Client, message: Message):
             print(f"[INBOX] No mapping for replied_msg={replied.id}")
             return
 
-        target_uid  = mapping["user_id"]
-        target_name = mapping.get("user_name", str(target_uid))
+        target_uid   = mapping["user_id"]
+        target_name  = mapping.get("user_name", str(target_uid))
         target_uname = mapping.get("username", "")
         content, msg_type = _msg_content_and_type(message)
 
@@ -287,259 +285,293 @@ async def inbox_group_reply(client: Client, message: Message):
         print(f"[INBOX] inbox_group_reply error: {e}")
 
 
-# ─── /chat — export conversation as CSV ──────────────────────────────────────
-# Works in two ways:
-#   1. Private chat:  /chat {user_id}  or  /chat @username
-#   2. Inbox group:   reply to a forwarded message with /chat  (no args needed)
+# ─── /chat — export conversation as CSV (private or inbox-group reply) ─────────
 
 @app.on_message(filters.command("chat") & filters.user(ADMIN_ID))
 async def chat_export_cmd(client: Client, message: Message):
-    args = message.command[1:]
-    user_id   = None
-    user_name = ""
-    username  = ""
+    print(f"[CHAT] triggered  chat={message.chat.id}  args={message.command[1:]}")
+    try:
+        args      = message.command[1:]
+        user_id   = None
+        user_name = ""
+        username  = ""
 
-    # ── Method 1: reply to forwarded message in inbox group ──────────────────
-    replied = message.reply_to_message
-    if replied and message.chat.type.name != "PRIVATE":
-        inbox_id = await _get_inbox_group()
-        if inbox_id and message.chat.id == inbox_id:
-            mapping = await inbox_col.find_one({
-                "inbox_msg_id": replied.id,
-                "group_id":     inbox_id,
-            })
-            if mapping:
-                user_id   = mapping["user_id"]
-                user_name = mapping.get("user_name", str(user_id))
-                username  = mapping.get("username", "")
-            else:
+        # Method 1: admin replies to a forwarded message in inbox group with /chat
+        replied = message.reply_to_message
+        if replied and message.chat.type.name != "PRIVATE":
+            inbox_id = await _get_inbox_group()
+            print(f"[CHAT] group reply mode  inbox_id={inbox_id}  replied_to={replied.id}")
+            if inbox_id and message.chat.id == inbox_id:
+                mapping = await inbox_col.find_one({
+                    "inbox_msg_id": replied.id,
+                    "group_id":     inbox_id,
+                })
+                if mapping:
+                    user_id   = mapping["user_id"]
+                    user_name = mapping.get("user_name", str(user_id))
+                    username  = mapping.get("username", "")
+                    print(f"[CHAT] mapped → user_id={user_id}")
+                else:
+                    await message.reply_text(
+                        "❌ Could not identify user from this message.\n"
+                        "Make sure you're replying to a <b>forwarded user message</b>.",
+                        parse_mode=HTML,
+                    )
+                    return
+
+        # Method 2: /chat {user_id} or /chat @username in private
+        if not user_id:
+            if not args:
                 await message.reply_text(
-                    "❌ Could not identify user from this message.\n"
-                    "Make sure you're replying to a <b>forwarded user message</b>.",
+                    "📤 <b>Export Conversation</b>\n\n"
+                    "<b>In inbox group:</b>  Reply to any forwarded user message with <code>/chat</code>\n\n"
+                    "<b>In private:</b>\n"
+                    "<code>/chat {user_id}</code>\n"
+                    "<code>/chat @username</code>",
                     parse_mode=HTML,
                 )
                 return
 
-    # ── Method 2: explicit user_id or @username ───────────────────────────────
-    if not user_id:
-        if not args:
+            raw = args[0].lstrip("@")
+            if raw.isdigit():
+                user_id = int(raw)
+                print(f"[CHAT] numeric id={user_id}")
+            else:
+                doc = await conversations_col.find_one({"username": raw})
+                if doc:
+                    user_id   = doc["user_id"]
+                    user_name = doc.get("user_name", "")
+                    username  = doc.get("username", "")
+                    print(f"[CHAT] username lookup → user_id={user_id}")
+
+        if not user_id:
             await message.reply_text(
-                "📤 <b>Export conversation</b>\n\n"
-                "<b>Option 1 — In inbox group:</b>\n"
-                "Reply to any forwarded user message with <code>/chat</code>\n\n"
-                "<b>Option 2 — In private:</b>\n"
-                "<code>/chat {user_id}</code>\n"
-                "<code>/chat @username</code>",
+                f"❌ User not found: <code>{args[0] if args else '?'}</code>\n\n"
+                "Make sure the user has sent a message to the bot.",
                 parse_mode=HTML,
             )
             return
 
-        raw = args[0].lstrip("@")
-        if raw.isdigit():
-            user_id = int(raw)
-        else:
-            doc = await conversations_col.find_one({"username": raw})
-            if doc:
-                user_id   = doc["user_id"]
-                user_name = doc.get("user_name", "")
-                username  = doc.get("username", "")
+        docs = await conversations_col.find({"user_id": user_id}).sort("timestamp", 1).to_list(length=None)
+        print(f"[CHAT] found {len(docs)} records for user_id={user_id}")
 
-    if not user_id:
-        await message.reply_text(
-            f"❌ User not found: <code>{args[0] if args else '?'}</code>\n\n"
-            "Make sure the user has sent a message to the bot.",
+        if not docs:
+            await message.reply_text(
+                f"📭 No conversation history for <code>{user_id}</code>.\n\n"
+                f"<i>Only messages received after the latest bot update are stored.</i>",
+                parse_mode=HTML,
+            )
+            return
+
+        if not user_name:
+            user_name = docs[0].get("user_name", str(user_id))
+        if not username:
+            username  = docs[0].get("username", "")
+
+        uname_display = f"@{username}" if username else "no username"
+        csv_bytes = _to_csv_bytes(docs)
+        buf = io.BytesIO(csv_bytes)
+        buf.name = f"chat_{user_id}.csv"
+
+        await message.reply_document(
+            document=buf,
+            caption=(
+                f"💬 <b>Conversation Export</b>\n"
+                f"👤 {user_name}  ({uname_display})\n"
+                f"🆔 <code>{user_id}</code>\n"
+                f"📨 {len(docs)} messages"
+            ),
             parse_mode=HTML,
         )
-        return
+        print(f"[CHAT] CSV sent for user_id={user_id}")
 
-    docs = await conversations_col.find({"user_id": user_id}).sort("timestamp", 1).to_list(length=None)
-    if not docs:
-        await message.reply_text(
-            f"📭 No conversation history for <code>{user_id}</code>.",
-            parse_mode=HTML,
-        )
-        return
-
-    if not user_name:
-        user_name = docs[0].get("user_name", str(user_id))
-    if not username:
-        username  = docs[0].get("username", "")
-
-    uname_display = f"@{username}" if username else "no username"
-
-    csv_bytes = _to_csv_bytes(docs)
-    buf = io.BytesIO(csv_bytes)
-    buf.name = f"chat_{user_id}.csv"
-
-    await message.reply_document(
-        document=buf,
-        caption=(
-            f"💬 <b>Conversation Export</b>\n"
-            f"👤 {user_name}  ({uname_display})\n"
-            f"🆔 <code>{user_id}</code>\n"
-            f"📨 {len(docs)} messages"
-        ),
-        parse_mode=HTML,
-    )
+    except Exception as e:
+        print(f"[CHAT] error: {e}")
+        try:
+            await message.reply_text(f"❌ Error: <code>{e}</code>", parse_mode=HTML)
+        except Exception:
+            pass
 
 
-# ─── /inbox — list users / export by period / delete ─────────────────────────
+# ─── /inbox — list / export CSV / delete ──────────────────────────────────────
 
 @app.on_message(filters.command("inbox") & filters.user(ADMIN_ID))
 async def inbox_cmd(client: Client, message: Message):
-    args = message.command[1:]
+    print(f"[INBOX_CMD] triggered  chat={message.chat.id}  args={message.command[1:]}")
+    try:
+        args = message.command[1:]
 
-    # ── /inbox  (no args) — list all users who messaged ──────────────────────
-    if not args:
-        pipeline = [
-            {"$match": {"direction": "in"}},
-            {"$group": {
-                "_id":       "$user_id",
-                "user_name": {"$last": "$user_name"},
-                "username":  {"$last": "$username"},
-                "count":     {"$sum": 1},
-                "last_msg":  {"$max": "$timestamp"},
-            }},
-            {"$sort": {"last_msg": -1}},
-        ]
-        docs = await conversations_col.aggregate(pipeline).to_list(length=None)
-        if not docs:
-            await message.reply_text("📭 No inbox messages yet.")
-            return
+        # ── /inbox  (no args) — show all users ───────────────────────────────
+        if not args:
+            pipeline = [
+                {"$match": {"direction": "in"}},
+                {"$group": {
+                    "_id":       "$user_id",
+                    "user_name": {"$last": "$user_name"},
+                    "username":  {"$last": "$username"},
+                    "count":     {"$sum": 1},
+                    "last_msg":  {"$max": "$timestamp"},
+                }},
+                {"$sort": {"last_msg": -1}},
+            ]
+            docs = await conversations_col.aggregate(pipeline).to_list(length=None)
+            print(f"[INBOX_CMD] users found={len(docs)}")
 
-        lines = [f"📥 <b>Inbox — {len(docs)} Users</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
-        for d in docs[:50]:
-            uid   = d["_id"]
-            name  = d.get("user_name", "Unknown")
-            uname = f"@{d['username']}" if d.get("username") else "no username"
-            cnt   = d.get("count", 0)
-            last  = d.get("last_msg", datetime.utcnow()).strftime("%d %b %Y")
-            lines.append(
-                f"\n👤 <a href='tg://user?id={uid}'>{name}</a>  ({uname})\n"
-                f"   🆔 <code>{uid}</code>  |  📨 {cnt} msgs  |  📅 {last}\n"
-                f"   ↳ <code>/chat {uid}</code>"
-            )
-        await message.reply_text("\n".join(lines), parse_mode=HTML, disable_web_page_preview=True)
-        return
-
-    # ── /inbox delete … ───────────────────────────────────────────────────────
-    if args[0].lower() == "delete":
-        sub = args[1].lower() if len(args) > 1 else ""
-
-        if sub == "all":
-            r1 = await conversations_col.delete_many({})
-            r2 = await inbox_col.delete_many({})
-            await message.reply_text(
-                f"🗑️ <b>All Inbox Data Deleted</b>\n"
-                f"Conversations: <b>{r1.deleted_count}</b>\n"
-                f"Mappings: <b>{r2.deleted_count}</b>",
-                parse_mode=HTML,
-            )
-            return
-
-        if sub == "user" and len(args) > 2:
-            raw = args[2].lstrip("@")
-            uid = int(raw) if raw.isdigit() else None
-            if not uid:
-                doc = await conversations_col.find_one({"username": raw})
-                uid = doc["user_id"] if doc else None
-            if not uid:
-                await message.reply_text(f"❌ User not found: <code>{raw}</code>", parse_mode=HTML)
+            if not docs:
+                await message.reply_text(
+                    "📭 <b>No inbox messages yet.</b>\n\n"
+                    "<i>Messages appear here once users chat with the bot.</i>",
+                    parse_mode=HTML,
+                )
                 return
-            r1 = await conversations_col.delete_many({"user_id": uid})
-            await inbox_col.delete_many({"user_id": uid})
+
+            lines = [f"📥 <b>Inbox — {len(docs)} Users</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+            for d in docs[:50]:
+                uid   = d["_id"]
+                name  = d.get("user_name", "Unknown")
+                uname = f"@{d['username']}" if d.get("username") else "no username"
+                cnt   = d.get("count", 0)
+                last  = d.get("last_msg", datetime.utcnow()).strftime("%d %b %Y")
+                lines.append(
+                    f"\n👤 <a href='tg://user?id={uid}'>{name}</a>  ({uname})\n"
+                    f"   🆔 <code>{uid}</code>  |  📨 {cnt} msgs  |  📅 {last}\n"
+                    f"   ↳ <code>/chat {uid}</code>"
+                )
             await message.reply_text(
-                f"🗑️ Deleted <b>{r1.deleted_count}</b> messages for user <code>{uid}</code>.",
+                "\n".join(lines),
+                parse_mode=HTML,
+                disable_web_page_preview=True,
+            )
+            return
+
+        # ── /inbox delete … ───────────────────────────────────────────────────
+        if args[0].lower() == "delete":
+            sub = args[1].lower() if len(args) > 1 else ""
+
+            if sub == "all":
+                r1 = await conversations_col.delete_many({})
+                r2 = await inbox_col.delete_many({})
+                await message.reply_text(
+                    f"🗑️ <b>All Inbox Data Deleted</b>\n"
+                    f"Conversations: <b>{r1.deleted_count}</b>\n"
+                    f"Mappings: <b>{r2.deleted_count}</b>",
+                    parse_mode=HTML,
+                )
+                return
+
+            if sub == "user" and len(args) > 2:
+                raw = args[2].lstrip("@")
+                uid = int(raw) if raw.isdigit() else None
+                if not uid:
+                    doc = await conversations_col.find_one({"username": raw})
+                    uid = doc["user_id"] if doc else None
+                if not uid:
+                    await message.reply_text(f"❌ User not found: <code>{raw}</code>", parse_mode=HTML)
+                    return
+                r1 = await conversations_col.delete_many({"user_id": uid})
+                await inbox_col.delete_many({"user_id": uid})
+                await message.reply_text(
+                    f"🗑️ Deleted <b>{r1.deleted_count}</b> messages for user <code>{uid}</code>.",
+                    parse_mode=HTML,
+                )
+                return
+
+            if sub == "date" and len(args) > 2:
+                raw_date = args[2]
+                dt = _parse_period(raw_date)
+                if not dt:
+                    await message.reply_text(f"❌ Invalid date: <code>{raw_date}</code>", parse_mode=HTML)
+                    return
+                end_of_day = dt.replace(hour=23, minute=59, second=59)
+                result = await conversations_col.delete_many({
+                    "timestamp": {"$gte": dt, "$lte": end_of_day}
+                })
+                await message.reply_text(
+                    f"🗑️ Deleted <b>{result.deleted_count}</b> messages from <code>{raw_date}</code>.",
+                    parse_mode=HTML,
+                )
+                return
+
+            await message.reply_text(
+                "🗑️ <b>Delete Inbox Data</b>\n\n"
+                "<code>/inbox delete all</code>               — Delete everything\n"
+                "<code>/inbox delete user {id/@user}</code>   — Delete one user\n"
+                "<code>/inbox delete date 2024-01-15</code>   — Delete by date",
                 parse_mode=HTML,
             )
             return
 
-        if sub == "date" and len(args) > 2:
-            raw_date = args[2]
-            dt = _parse_period(raw_date)
+        # ── /inbox {period | date | all} — export as CSV ──────────────────────
+        period_arg = args[0].lower()
+        is_all    = period_arg == "all"
+        is_date   = _is_date_arg(period_arg)
+        is_period = bool(re.match(r"^\d+_days?$", period_arg, re.IGNORECASE))
+
+        if not (is_all or is_date or is_period):
+            await message.reply_text(
+                "📥 <b>Inbox Export</b>\n\n"
+                "Examples:\n"
+                "<code>/inbox all</code>        — All messages\n"
+                "<code>/inbox 1_days</code>     — Last 1 day\n"
+                "<code>/inbox 7_days</code>     — Last 7 days\n"
+                "<code>/inbox 30_days</code>    — Last 30 days\n"
+                "<code>/inbox 2024-01-15</code> — Specific date\n\n"
+                "Manage:\n"
+                "<code>/inbox</code>            — List all users\n"
+                "<code>/chat {id}</code>        — Export one user's chat\n"
+                "<code>/inbox delete …</code>   — Delete records",
+                parse_mode=HTML,
+            )
+            return
+
+        query: dict = {"direction": "in"}
+        title_suffix = "All Time"
+
+        if is_all:
+            pass
+        elif is_period:
+            cutoff = _parse_period(period_arg)
+            query["timestamp"] = {"$gte": cutoff}
+            days_n = period_arg.split("_")[0]
+            title_suffix = f"Last {days_n} Days"
+        else:
+            dt = _parse_period(period_arg)
             if not dt:
-                await message.reply_text(f"❌ Invalid date: <code>{raw_date}</code>", parse_mode=HTML)
+                await message.reply_text(f"❌ Invalid date: <code>{period_arg}</code>", parse_mode=HTML)
                 return
             end_of_day = dt.replace(hour=23, minute=59, second=59)
-            result = await conversations_col.delete_many({
-                "timestamp": {"$gte": dt, "$lte": end_of_day}
-            })
+            query["timestamp"] = {"$gte": dt, "$lte": end_of_day}
+            title_suffix = dt.strftime("%Y-%m-%d")
+
+        docs = await conversations_col.find(query).sort("timestamp", 1).to_list(length=None)
+        print(f"[INBOX_CMD] export found {len(docs)} records")
+
+        if not docs:
             await message.reply_text(
-                f"🗑️ Deleted <b>{result.deleted_count}</b> messages from <code>{raw_date}</code>.",
+                f"📭 No inbox messages for: <b>{period_arg}</b>",
                 parse_mode=HTML,
             )
             return
 
-        await message.reply_text(
-            "🗑️ <b>Delete Inbox Data</b>\n\n"
-            "<code>/inbox delete all</code>               — Delete everything\n"
-            "<code>/inbox delete user {id/@user}</code>   — Delete one user\n"
-            "<code>/inbox delete date 2024-01-15</code>   — Delete by date",
+        safe_name = re.sub(r"[^\w\-]", "_", period_arg)
+        csv_bytes = _to_csv_bytes(docs)
+        buf = io.BytesIO(csv_bytes)
+        buf.name = f"inbox_{safe_name}.csv"
+
+        await message.reply_document(
+            document=buf,
+            caption=(
+                f"📥 <b>Inbox Export</b>  —  {title_suffix}\n"
+                f"📨 {len(docs)} messages\n"
+                f"📅 {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+            ),
             parse_mode=HTML,
         )
-        return
+        print(f"[INBOX_CMD] export sent period={period_arg} count={len(docs)}")
 
-    # ── /inbox {period | date} — export as .txt file ──────────────────────────
-    period_arg = args[0].lower()
-    is_all     = period_arg == "all"
-    is_date    = _is_date_arg(period_arg)
-    is_period  = bool(re.match(r"^\d+_days?$", period_arg, re.IGNORECASE))
-
-    if not (is_all or is_date or is_period):
-        await message.reply_text(
-            "📥 <b>Inbox Export</b>\n\n"
-            "Examples:\n"
-            "<code>/inbox all</code>        — All messages\n"
-            "<code>/inbox 1_days</code>     — Last 1 day\n"
-            "<code>/inbox 7_days</code>     — Last 7 days\n"
-            "<code>/inbox 30_days</code>    — Last 30 days\n"
-            "<code>/inbox 2024-01-15</code> — Specific date\n\n"
-            "👥 Manage:\n"
-            "<code>/inbox</code>            — List all users\n"
-            "<code>/chat {id}</code>        — Export one user's chat\n"
-            "<code>/inbox delete …</code>   — Delete records",
-            parse_mode=HTML,
-        )
-        return
-
-    query: dict = {"direction": "in"}
-    title_suffix = "All Time"
-
-    if is_all:
-        pass
-    elif is_period:
-        cutoff = _parse_period(period_arg)
-        query["timestamp"] = {"$gte": cutoff}
-        days_n = period_arg.split("_")[0]
-        title_suffix = f"Last {days_n} Days"
-    else:
-        dt = _parse_period(period_arg)
-        if not dt:
-            await message.reply_text(f"❌ Invalid date: <code>{period_arg}</code>", parse_mode=HTML)
-            return
-        end_of_day = dt.replace(hour=23, minute=59, second=59)
-        query["timestamp"] = {"$gte": dt, "$lte": end_of_day}
-        title_suffix = dt.strftime("%Y-%m-%d")
-
-    docs = await conversations_col.find(query).sort("timestamp", 1).to_list(length=None)
-    if not docs:
-        await message.reply_text(
-            f"📭 No inbox messages for: <b>{period_arg}</b>",
-            parse_mode=HTML,
-        )
-        return
-
-    csv_bytes = _to_csv_bytes(docs)
-    safe_name = re.sub(r"[^\w\-]", "_", period_arg)
-    buf = io.BytesIO(csv_bytes)
-    buf.name = f"inbox_{safe_name}.csv"
-
-    await message.reply_document(
-        document=buf,
-        caption=(
-            f"📥 <b>Inbox Export</b>  —  {title_suffix}\n"
-            f"📨 {len(docs)} messages\n"
-            f"📅 Exported: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
-        ),
-        parse_mode=HTML,
-    )
+    except Exception as e:
+        print(f"[INBOX_CMD] error: {e}")
+        try:
+            await message.reply_text(f"❌ Error: <code>{e}</code>", parse_mode=HTML)
+        except Exception:
+            pass
