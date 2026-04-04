@@ -1,14 +1,532 @@
 import asyncio
 from datetime import datetime
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, StopPropagation
 from pyrogram.types import Message
 
 from config import HTML, ADMIN_ID, clones_col, app
 from helpers import _auto_del, log_event, clone_admin_filter, get_cfg, _clone_config_ctx
 
+# ── In-memory setup wizard sessions ──────────────────────────────────────────
+# Key: (token, admin_id)  →  {"step": "log_group"|"video_channel"|"inbox_group"}
+_setup_sessions: dict[tuple, dict] = {}
 
-# ─── /addclone ────────────────────────────────────────────────────────────────
+SETUP_STEPS = ["log_group", "video_channel", "inbox_group"]
+
+STEP_PROMPTS = {
+    "log_group": (
+        "📋 <b>Step 1 of 3 — Log Group</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "All bot events (joins, videos, errors) will be sent here.\n\n"
+        "<b>How to set:</b>\n"
+        "• Add the bot to your log group as admin\n"
+        "• Then run <code>/setclonelog</code> inside that group\n\n"
+        "OR send the <b>group ID</b> here directly.\n\n"
+        "Type /skip to skip this step."
+    ),
+    "video_channel": (
+        "📺 <b>Step 2 of 3 — Video Channel</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Videos will be fetched from this channel.\n\n"
+        "<b>How to set:</b>\n"
+        "• Forward any message from the channel here\n\n"
+        "OR send the <b>channel ID</b> directly.\n\n"
+        "Type /skip to skip this step."
+    ),
+    "inbox_group": (
+        "📬 <b>Step 3 of 3 — Inbox / Support Group</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "User messages will be forwarded to this group.\n\n"
+        "<b>How to set:</b>\n"
+        "• Add the bot to your support group as admin\n"
+        "• Then run <code>/setcloneinbox</code> inside that group\n\n"
+        "OR send the <b>group ID</b> here directly.\n\n"
+        "Type /skip to skip this step."
+    ),
+}
+
+
+def _setup_key(cfg: dict) -> tuple:
+    return (cfg.get("token"), cfg.get("admin_id"))
+
+
+def _next_step(current: str) -> str | None:
+    idx = SETUP_STEPS.index(current)
+    return SETUP_STEPS[idx + 1] if idx + 1 < len(SETUP_STEPS) else None
+
+
+async def _send_step_prompt(client: Client, admin_id: int, step: str, token: str = None):
+    prompt = STEP_PROMPTS.get(step, "")
+    await client.send_message(admin_id, prompt, parse_mode=HTML)
+
+
+async def _finish_setup(client: Client, cfg: dict, admin_id: int):
+    """Called when all steps are complete."""
+    tok  = cfg.get("token")
+    name = cfg.get("name", "Clone Bot")
+
+    # Reload fresh config from DB
+    from clone_manager import reload_clone_config
+    fresh = await reload_clone_config(tok)
+    vc  = (fresh or cfg).get("video_channel") or "❌ Not set"
+    ig  = (fresh or cfg).get("inbox_group")   or "❌ Not set"
+    lg  = (fresh or cfg).get("log_group")     or "❌ Not set"
+
+    summary = (
+        f"✅ <b>Setup Complete! Your bot is ready.</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 Bot Name      : <b>{name}</b>\n\n"
+        f"📋 Log Group     : <code>{lg}</code>\n"
+        f"📺 Video Channel : <code>{vc}</code>\n"
+        f"📬 Inbox Group   : <code>{ig}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Your bot is now fully operational!\n\n"
+        f"<b>Commands you can use:</b>\n"
+        f"  /cloneconfig — view & update settings anytime\n"
+        f"  /help        — all available commands"
+    )
+    await client.send_message(admin_id, summary, parse_mode=HTML)
+
+    # Send connection confirmation to log group
+    lg_id = (fresh or cfg).get("log_group")
+    if lg_id:
+        try:
+            await client.send_message(
+                lg_id,
+                f"🟢 <b>Bot Connected!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🤖 <b>{name}</b> is now live and fully configured.\n"
+                f"📺 Video Channel : <code>{vc}</code>\n"
+                f"📬 Inbox Group   : <code>{ig}</code>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"All events from this bot will appear here.",
+                parse_mode=HTML,
+            )
+        except Exception as e:
+            print(f"[CLONE_SETUP] Could not send to log group {lg_id}: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SETUP WIZARD MESSAGE HANDLER  (group=-1, high priority, StopPropagation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(clone_admin_filter & filters.private & filters.incoming, group=-1)
+async def clone_setup_handler(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        return  # Not in clone context — let other handlers proceed
+
+    uid = message.from_user.id
+    key = _setup_key(cfg)
+    session = _setup_sessions.get(key)
+    if not session:
+        return  # No active setup session
+
+    step = session.get("step")
+    text = (message.text or "").strip()
+    tok  = cfg.get("token")
+
+    # ── /skip ─────────────────────────────────────────────────────────────
+    if text.lower() == "/skip":
+        nxt = _next_step(step)
+        if nxt:
+            _setup_sessions[key]["step"] = nxt
+            await message.reply_text(
+                f"⏩ Skipped.\n\n{STEP_PROMPTS[nxt]}",
+                parse_mode=HTML,
+            )
+        else:
+            _setup_sessions.pop(key, None)
+            await _finish_setup(client, cfg, uid)
+        raise StopPropagation
+
+    # ── /cancel ───────────────────────────────────────────────────────────
+    if text.lower() == "/cancel":
+        _setup_sessions.pop(key, None)
+        await message.reply_text(
+            "🚫 Setup cancelled.\n\n"
+            "Run /cloneconfig to see current settings or restart setup with /setupclone.",
+            parse_mode=HTML,
+        )
+        raise StopPropagation
+
+    # ── Detect channel/group ID ────────────────────────────────────────────
+    detected_id = None
+
+    # From forwarded message → get channel ID for video_channel step
+    if message.forward_from_chat and step == "video_channel":
+        fwd = message.forward_from_chat
+        if fwd.type.value == "channel":
+            detected_id = fwd.id
+
+    # From plain number
+    if detected_id is None:
+        clean = text.replace(" ", "")
+        if clean.lstrip("-").isdigit():
+            detected_id = int(clean)
+
+    if detected_id is None:
+        await message.reply_text(
+            f"⚠️ Invalid input.\n\n"
+            f"Please send a valid group/channel ID (e.g. <code>-1001234567890</code>)\n"
+            f"or type /skip to skip this step.",
+            parse_mode=HTML,
+        )
+        raise StopPropagation
+
+    # ── Save the value ─────────────────────────────────────────────────────
+    await clones_col.update_one({"token": tok}, {"$set": {step: detected_id}})
+    from clone_manager import reload_clone_config
+    new_cfg = await reload_clone_config(tok)
+
+    STEP_LABELS = {
+        "log_group":     "📋 Log Group",
+        "video_channel": "📺 Video Channel",
+        "inbox_group":   "📬 Inbox Group",
+    }
+    await message.reply_text(
+        f"✅ <b>{STEP_LABELS[step]} set!</b>\n🆔 <code>{detected_id}</code>",
+        parse_mode=HTML,
+    )
+
+    # ── Advance to next step ───────────────────────────────────────────────
+    nxt = _next_step(step)
+    if nxt:
+        _setup_sessions[key]["step"] = nxt
+        await asyncio.sleep(0.5)
+        await client.send_message(uid, STEP_PROMPTS[nxt], parse_mode=HTML)
+    else:
+        _setup_sessions.pop(key, None)
+        await asyncio.sleep(0.5)
+        await _finish_setup(client, new_cfg or cfg, uid)
+
+    raise StopPropagation
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CLONE /help COMMAND  (overrides main bot help when in clone context)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("help") & clone_admin_filter & filters.private, group=-1)
+async def clone_help_cmd(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        return  # Main bot /help handles this
+
+    name = cfg.get("name", "Clone Bot")
+    await message.reply_text(
+        f"📋 <b>{name} — Admin Help</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>⚙️ Setup & Config</b>\n"
+        f"  /cloneconfig     — View current config\n"
+        f"  /setupclone      — Restart setup wizard\n"
+        f"  /setvideochannel — Set video source channel\n"
+        f"  /setcloneinbox   — Set inbox/support group\n"
+        f"  /setclonelog     — Set log group\n\n"
+        f"<b>👤 User Management</b>\n"
+        f"  /stats           — Bot statistics\n"
+        f"  /user {'{id}'}     — View user profile\n"
+        f"  /blockuser {'{id}'}— Block a user\n"
+        f"  /unblockuser {'{id}'} — Unblock a user\n"
+        f"  /addpoints {'{id} n}'} — Add points\n"
+        f"  /removepoints {'{id} n}'} — Remove points\n"
+        f"  /setlimit {'{id} n}'} — Set daily video limit\n"
+        f"  /resetcount {'{id}'} — Reset today's count\n\n"
+        f"<b>📢 Broadcast</b>\n"
+        f"  /broadcast       — Send message to all users\n"
+        f"  /sbc             — Scheduled broadcast\n\n"
+        f"<b>📬 Inbox</b>\n"
+        f"  /inbox           — Open inbox panel\n"
+        f"  /chat {'{id}'}    — Start chat with user\n\n"
+        f"<b>🎬 Videos</b>\n"
+        f"  /syncvideos      — Sync videos from channel\n"
+        f"  /listvideos      — List all videos\n"
+        f"  /delvideo {'{n}'}  — Delete a video entry\n\n"
+        f"<b>🛡️ Groups</b>\n"
+        f"  /groups          — Manage connected groups\n"
+        f"  /forcejoin       — Manage force-join channels\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 <b>{name}</b> | Powered by DESI MLH",
+        parse_mode=HTML,
+    )
+    raise StopPropagation
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /setupclone — restart wizard
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("setupclone") & clone_admin_filter & filters.private)
+async def restart_setup_cmd(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        await message.reply_text("ℹ️ This command works only in the clone bot.", parse_mode=HTML)
+        return
+
+    key = _setup_key(cfg)
+    _setup_sessions[key] = {"step": "log_group"}
+
+    await message.reply_text(
+        f"🔄 <b>Setup Wizard Restarted</b>\n\n"
+        f"Let's configure your bot step by step.\n\n"
+        f"{STEP_PROMPTS['log_group']}",
+        parse_mode=HTML,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GROUP COMMANDS: /setclonelog and /setcloneinbox (used inside group)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("setclonelog") & clone_admin_filter)
+async def set_clone_log_cmd(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        await message.reply_text("ℹ️ This command works only in the clone bot.", parse_mode=HTML)
+        return
+
+    tok = cfg.get("token")
+
+    if message.chat.type.name in ("GROUP", "SUPERGROUP"):
+        group_id = message.chat.id
+        await clones_col.update_one({"token": tok}, {"$set": {"log_group": group_id}})
+        from clone_manager import reload_clone_config
+        await reload_clone_config(tok)
+
+        # Advance setup wizard if active
+        uid = message.from_user.id
+        key = _setup_key(cfg)
+        session = _setup_sessions.get(key)
+        m = await message.reply_text(
+            f"✅ <b>Log Group Set!</b>\n"
+            f"📋 <code>{group_id}</code> — This group will receive all bot logs.",
+            parse_mode=HTML,
+        )
+        asyncio.create_task(_auto_del(m, 20))
+
+        if session and session.get("step") == "log_group":
+            nxt = _next_step("log_group")
+            _setup_sessions[key]["step"] = nxt
+            await client.send_message(uid, STEP_PROMPTS[nxt], parse_mode=HTML)
+        return
+
+    # Private: accept ID
+    args = message.command[1:]
+    if not args or not args[0].lstrip("-").isdigit():
+        current = cfg.get("log_group") or "Not set"
+        await message.reply_text(
+            f"📋 <b>Set Log Group</b>\n"
+            f"Current: <code>{current}</code>\n\n"
+            f"• Run <code>/setclonelog</code> inside the group, OR\n"
+            f"• <code>/setclonelog -1001234567890</code>",
+            parse_mode=HTML,
+        )
+        return
+
+    group_id = int(args[0])
+    await clones_col.update_one({"token": tok}, {"$set": {"log_group": group_id}})
+    from clone_manager import reload_clone_config
+    await reload_clone_config(tok)
+
+    uid = message.from_user.id
+    key = _setup_key(cfg)
+    session = _setup_sessions.get(key)
+    await message.reply_text(f"✅ Log Group set: <code>{group_id}</code>", parse_mode=HTML)
+    if session and session.get("step") == "log_group":
+        nxt = _next_step("log_group")
+        _setup_sessions[key]["step"] = nxt
+        await client.send_message(uid, STEP_PROMPTS[nxt], parse_mode=HTML)
+
+
+@app.on_message(filters.command("setcloneinbox") & clone_admin_filter)
+async def set_clone_inbox_cmd(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        await message.reply_text("ℹ️ This command works only in the clone bot.", parse_mode=HTML)
+        return
+
+    tok = cfg.get("token")
+
+    if message.chat.type.name in ("GROUP", "SUPERGROUP"):
+        group_id = message.chat.id
+        await clones_col.update_one({"token": tok}, {"$set": {"inbox_group": group_id}})
+        from clone_manager import reload_clone_config
+        await reload_clone_config(tok)
+
+        uid = message.from_user.id
+        key = _setup_key(cfg)
+        session = _setup_sessions.get(key)
+        m = await message.reply_text(
+            f"✅ <b>Inbox Group Set!</b>\n"
+            f"📬 <code>{group_id}</code> — User messages will be forwarded here.",
+            parse_mode=HTML,
+        )
+        asyncio.create_task(_auto_del(m, 20))
+
+        if session and session.get("step") == "inbox_group":
+            _setup_sessions.pop(key, None)
+            from clone_manager import reload_clone_config
+            fresh = await reload_clone_config(tok)
+            await _finish_setup(client, fresh or cfg, uid)
+        return
+
+    # Private: accept ID
+    args = message.command[1:]
+    if not args or not args[0].lstrip("-").isdigit():
+        current = cfg.get("inbox_group") or "Not set"
+        await message.reply_text(
+            f"📬 <b>Set Inbox Group</b>\n"
+            f"Current: <code>{current}</code>\n\n"
+            f"• Run <code>/setcloneinbox</code> inside the group, OR\n"
+            f"• <code>/setcloneinbox -1001234567890</code>",
+            parse_mode=HTML,
+        )
+        return
+
+    group_id = int(args[0])
+    await clones_col.update_one({"token": tok}, {"$set": {"inbox_group": group_id}})
+    from clone_manager import reload_clone_config
+    await reload_clone_config(tok)
+
+    uid = message.from_user.id
+    key = _setup_key(cfg)
+    session = _setup_sessions.get(key)
+    await message.reply_text(f"✅ Inbox Group set: <code>{group_id}</code>", parse_mode=HTML)
+    if session and session.get("step") == "inbox_group":
+        _setup_sessions.pop(key, None)
+        fresh = await reload_clone_config(tok)
+        await _finish_setup(client, fresh or cfg, uid)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /setvideochannel — private (with forward detection)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("setvideochannel") & clone_admin_filter & filters.private)
+async def set_video_channel_cmd(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        await message.reply_text("ℹ️ This command works only in the clone bot.", parse_mode=HTML)
+        return
+
+    args = message.command[1:]
+    tok  = cfg.get("token")
+
+    if not args:
+        current = cfg.get("video_channel") or "Not set"
+        await message.reply_text(
+            f"📺 <b>Set Video Channel</b>\n"
+            f"Current: <code>{current}</code>\n\n"
+            f"• Forward any message from the channel here, OR\n"
+            f"• <code>/setvideochannel -1001234567890</code>",
+            parse_mode=HTML,
+        )
+        return
+
+    if not args[0].lstrip("-").isdigit():
+        await message.reply_text("❌ Invalid channel ID.", parse_mode=HTML)
+        return
+
+    ch_id = int(args[0])
+    await clones_col.update_one({"token": tok}, {"$set": {"video_channel": ch_id}})
+    from clone_manager import reload_clone_config
+    await reload_clone_config(tok)
+
+    uid = message.from_user.id
+    key = _setup_key(cfg)
+    session = _setup_sessions.get(key)
+    await message.reply_text(
+        f"✅ <b>Video Channel Set!</b>\n📺 <code>{ch_id}</code>",
+        parse_mode=HTML,
+    )
+    if session and session.get("step") == "video_channel":
+        nxt = _next_step("video_channel")
+        _setup_sessions[key]["step"] = nxt
+        await client.send_message(uid, STEP_PROMPTS[nxt], parse_mode=HTML)
+
+
+# ── Forward detection for video channel (during setup) ────────────────────────
+
+@app.on_message(clone_admin_filter & filters.private & filters.forwarded, group=-1)
+async def forward_detect_channel(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        return
+
+    fwd_chat = message.forward_from_chat
+    if not fwd_chat or fwd_chat.type.value != "channel":
+        return
+
+    tok = cfg.get("token")
+    ch_id = fwd_chat.id
+    await clones_obj_update(tok, "video_channel", ch_id)
+    from clone_manager import reload_clone_config
+    await reload_clone_config(tok)
+
+    uid = message.from_user.id
+    key = _setup_key(cfg)
+    session = _setup_sessions.get(key)
+
+    await message.reply_text(
+        f"✅ <b>Video Channel Detected!</b>\n"
+        f"📺 <b>{fwd_chat.title}</b>\n"
+        f"🆔 <code>{ch_id}</code>",
+        parse_mode=HTML,
+    )
+    if session and session.get("step") == "video_channel":
+        nxt = _next_step("video_channel")
+        _setup_sessions[key]["step"] = nxt
+        await asyncio.sleep(0.5)
+        await client.send_message(uid, STEP_PROMPTS[nxt], parse_mode=HTML)
+    raise StopPropagation
+
+
+async def clones_obj_update(token: str, field: str, value):
+    await clones_col.update_one({"token": token}, {"$set": {field: value}})
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# /cloneconfig — show current settings
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.on_message(filters.command("cloneconfig") & clone_admin_filter & filters.private)
+async def cloneconfig_cmd(client: Client, message: Message):
+    cfg = _clone_config_ctx.get()
+    if not cfg:
+        await message.reply_text(
+            "ℹ️ This command only works when messaging the clone bot directly.",
+            parse_mode=HTML,
+        )
+        return
+
+    from clone_manager import reload_clone_config
+    fresh = await reload_clone_config(cfg.get("token")) or cfg
+
+    vc   = fresh.get("video_channel") or "❌ Not set"
+    ig   = fresh.get("inbox_group")   or "❌ Not set"
+    lg   = fresh.get("log_group")     or "❌ Not set"
+    adm  = fresh.get("admin_id")      or "❌ Not set"
+    name = fresh.get("name", "?")
+
+    await message.reply_text(
+        f"⚙️ <b>Clone Bot Configuration</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 Name          : <b>{name}</b>\n"
+        f"👤 Admin ID      : <code>{adm}</code>\n\n"
+        f"📋 Log Group     : <code>{lg}</code>\n"
+        f"📺 Video Channel : <code>{vc}</code>\n"
+        f"📬 Inbox Group   : <code>{ig}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Update commands:\n"
+        f"  /setvideochannel  /setcloneinbox  /setclonelog\n"
+        f"  /setupclone — restart setup wizard",
+        parse_mode=HTML,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN ADMIN: /addclone  /removeclone  /clones
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.on_message(filters.command("addclone") & filters.user(ADMIN_ID) & filters.private)
 async def addclone_cmd(client: Client, message: Message):
@@ -26,34 +544,32 @@ async def addclone_cmd(client: Client, message: Message):
         )
         return
 
-    token    = args[0]
+    token        = args[0]
     admin_id_str = args[1]
-    name     = " ".join(args[2:]) if len(args) > 2 else f"Clone {token[:10]}..."
+    name         = " ".join(args[2:]) if len(args) > 2 else f"Clone {token[:10]}..."
 
     if ":" not in token or len(token) < 20:
         await message.reply_text("❌ Invalid bot token format.", parse_mode=HTML)
         return
     if not admin_id_str.lstrip("-").isdigit():
-        await message.reply_text("❌ Invalid admin_id. Must be a numeric Telegram user ID.", parse_mode=HTML)
+        await message.reply_text("❌ Invalid admin_id.", parse_mode=HTML)
         return
 
     admin_id = int(admin_id_str)
-
     existing = await clones_col.find_one({"token": token})
     if existing and existing.get("active"):
         await message.reply_text(
-            f"ℹ️ Clone <b>{existing.get('name','?')}</b> is already active.",
-            parse_mode=HTML,
+            f"ℹ️ Clone <b>{existing.get('name','?')}</b> is already active.", parse_mode=HTML
         )
         return
 
     wait = await message.reply_text("⏳ Starting clone bot...", parse_mode=HTML)
 
     doc = {
-        "token":    token,
-        "name":     name,
-        "active":   True,
-        "admin_id": admin_id,
+        "token":         token,
+        "name":          name,
+        "active":        True,
+        "admin_id":      admin_id,
         "video_channel": None,
         "inbox_group":   None,
         "log_group":     None,
@@ -65,57 +581,41 @@ async def addclone_cmd(client: Client, message: Message):
     ok = await start_clone(token, name, doc=doc)
 
     if ok:
-        await clones_col.update_one(
-            {"token": token},
-            {"$set": doc},
-            upsert=True,
-        )
+        await clones_col.update_one({"token": token}, {"$set": doc}, upsert=True)
+
         await wait.edit_text(
             f"✅ <b>Clone Bot Started!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🤖 Name     : <b>{name}</b>\n"
-            f"🔑 Token    : <code>{token[:20]}...</code>\n"
-            f"👤 Admin ID : <code>{admin_id}</code>\n\n"
-            f"<b>Next steps — clone admin must configure:</b>\n"
-            f"  <code>/setvideochannel</code>  — add video channel\n"
-            f"  <code>/setcloneinbox</code>    — set inbox group\n"
-            f"  <code>/setclonelog</code>      — set log group\n"
-            f"  <code>/cloneconfig</code>      — view current settings\n\n"
-            f"All commands work when messaging the clone bot directly.",
+            f"🤖 <b>{name}</b>\n"
+            f"👤 Admin: <code>{admin_id}</code>\n\n"
+            f"Setup wizard has been sent to the admin.",
             parse_mode=HTML,
         )
         await log_event(client,
             f"🤖 <b>Clone Bot Added</b>\n"
-            f"📌 Name: {name}\n"
-            f"👤 Admin: <code>{admin_id}</code>\n"
-            f"🔑 Token: <code>{token[:20]}...</code>"
+            f"📌 {name} | 👤 Admin: <code>{admin_id}</code>"
         )
-        # Notify the clone admin
+
+        # Start setup wizard for clone admin
+        key = (token, admin_id)
+        _setup_sessions[key] = {"step": "log_group"}
         try:
             await client.send_message(
                 admin_id,
-                f"✅ <b>Your clone bot is now live!</b>\n\n"
-                f"🤖 Bot Name : <b>{name}</b>\n\n"
-                f"<b>You are the admin of this bot. Set it up:</b>\n"
-                f"  /setvideochannel — connect a video channel\n"
-                f"  /setcloneinbox   — set inbox/support group\n"
-                f"  /setclonelog     — set log/report group\n"
-                f"  /cloneconfig     — view all settings\n\n"
-                f"<i>Message the clone bot directly to use these commands.</i>",
+                f"👋 <b>Welcome! Your clone bot <i>{name}</i> is now live.</b>\n\n"
+                f"Let's set it up step by step. This will take about 1 minute.\n\n"
+                f"{STEP_PROMPTS['log_group']}",
                 parse_mode=HTML,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CLONE_SETUP] Could not message admin {admin_id}: {e}")
     else:
         await wait.edit_text(
-            "❌ <b>Failed to start clone.</b>\n\n"
+            "❌ <b>Failed to start clone.</b>\n"
             "• Invalid or expired token\n"
             "• Bot already running elsewhere",
             parse_mode=HTML,
         )
 
-
-# ─── /removeclone ─────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("removeclone") & filters.user(ADMIN_ID) & filters.private)
 async def removeclone_cmd(client: Client, message: Message):
@@ -128,8 +628,10 @@ async def removeclone_cmd(client: Client, message: Message):
     if not args:
         lines = ["📋 <b>Active Clones:</b>\n"]
         for i, doc in enumerate(docs, 1):
-            lines.append(f"{i}. <b>{doc.get('name','?')}</b>")
-            lines.append(f"   Token: <code>{doc['token'][:20]}...</code>")
+            lines.append(
+                f"{i}. <b>{doc.get('name','?')}</b>\n"
+                f"   Token: <code>{doc['token'][:20]}...</code>"
+            )
         lines.append("\nUsage: <code>/removeclone {token}</code>")
         await message.reply_text("\n".join(lines), parse_mode=HTML)
         return
@@ -145,13 +647,10 @@ async def removeclone_cmd(client: Client, message: Message):
     await clones_col.update_one({"token": token}, {"$set": {"active": False}})
 
     await message.reply_text(
-        f"✅ <b>Clone Removed</b>\n🤖 {doc.get('name','?')}",
-        parse_mode=HTML,
+        f"✅ <b>Clone Removed</b>\n🤖 {doc.get('name','?')}", parse_mode=HTML
     )
-    await log_event(client, f"🗑 <b>Clone Bot Removed</b>\n📌 {doc.get('name','?')}")
+    await log_event(client, f"🗑 <b>Clone Removed</b>\n📌 {doc.get('name','?')}")
 
-
-# ─── /clones ──────────────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("clones") & filters.user(ADMIN_ID) & filters.private)
 async def clones_list_cmd(client: Client, message: Message):
@@ -161,273 +660,28 @@ async def clones_list_cmd(client: Client, message: Message):
 
     if not docs:
         await message.reply_text(
-            "📭 <b>No clones configured.</b>\n\n"
-            "Use <code>/addclone {token} {admin_id} [name]</code> to add a clone bot.",
+            "📭 No clones.\nUse <code>/addclone {token} {admin_id} [name]</code>",
             parse_mode=HTML,
         )
         return
 
     lines = ["🤖 <b>CLONE BOTS — DESI MLH</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
     for i, doc in enumerate(docs, 1):
-        token     = doc["token"]
-        name      = doc.get("name", "?")
-        added_at  = doc.get("added_at")
-        admin_id_v = doc.get("admin_id", "—")
+        tok      = doc["token"]
+        name     = doc.get("name", "?")
+        adm      = doc.get("admin_id", "—")
+        added_at = doc.get("added_at")
         added_str = added_at.strftime("%d %b %Y") if added_at else "—"
-        status    = "🟢 Running" if token in running else "🔴 Stopped"
-        vc   = doc.get("video_channel") or "—"
-        ig   = doc.get("inbox_group")   or "—"
-        lg   = doc.get("log_group")     or "—"
+        status    = "🟢 Running" if tok in running else "🔴 Stopped"
+        vc = doc.get("video_channel") or "—"
+        ig = doc.get("inbox_group")   or "—"
+        lg = doc.get("log_group")     or "—"
         lines.append(
             f"{i}. {status}  <b>{name}</b>\n"
-            f"   👤 Admin: <code>{admin_id_v}</code>\n"
-            f"   🔑 Token: <code>{token[:20]}...</code>\n"
-            f"   📺 Video Ch: <code>{vc}</code>\n"
-            f"   📬 Inbox Grp: <code>{ig}</code>\n"
-            f"   📋 Log Grp: <code>{lg}</code>\n"
-            f"   📅 Added: {added_str}"
+            f"   👤 Admin: <code>{adm}</code>\n"
+            f"   📺 VC: <code>{vc}</code>  📬 IG: <code>{ig}</code>  📋 LG: <code>{lg}</code>\n"
+            f"   📅 {added_str}"
         )
 
-    lines.append(
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Total: {len(docs)}  |  🟢 {len(running)} running"
-    )
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━\n📊 {len(docs)} total | 🟢 {len(running)} running")
     await message.reply_text("\n\n".join(lines), parse_mode=HTML)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# CLONE ADMIN CONFIG COMMANDS (work only when messaging the clone bot)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-async def _update_clone_cfg(field: str, value) -> bool:
-    """Update a field in this clone's DB doc and refresh in-memory cache."""
-    from clone_manager import reload_clone_config
-    token = _clone_config_ctx.get()
-    if token is None:
-        return False
-    tok = token.get("token") if isinstance(token, dict) else None
-    if not tok:
-        cfg = _clone_config_ctx.get()
-        tok = cfg.get("token") if cfg else None
-    if not tok:
-        return False
-    await clones_col.update_one({"token": tok}, {"$set": {field: value}})
-    await reload_clone_config(tok)
-    return True
-
-
-async def _get_current_clone_token() -> str | None:
-    cfg = _clone_config_ctx.get()
-    return cfg.get("token") if cfg else None
-
-
-# ─── /cloneconfig ─────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("cloneconfig") & clone_admin_filter & filters.private)
-async def cloneconfig_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
-    if not cfg:
-        await message.reply_text(
-            "ℹ️ This command only works when messaging the <b>clone bot</b> directly.",
-            parse_mode=HTML,
-        )
-        return
-
-    vc  = cfg.get("video_channel") or "❌ Not set"
-    ig  = cfg.get("inbox_group")   or "❌ Not set"
-    lg  = cfg.get("log_group")     or "❌ Not set"
-    adm = cfg.get("admin_id")      or "❌ Not set"
-    name = cfg.get("name", "?")
-
-    await message.reply_text(
-        f"⚙️ <b>Clone Bot Configuration</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 Name        : <b>{name}</b>\n"
-        f"👤 Admin ID    : <code>{adm}</code>\n\n"
-        f"📺 Video Channel : <code>{vc}</code>\n"
-        f"📬 Inbox Group   : <code>{ig}</code>\n"
-        f"📋 Log Group     : <code>{lg}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>Setup commands:</b>\n"
-        f"  /setvideochannel — set video source channel\n"
-        f"  /setcloneinbox   — set inbox/support group\n"
-        f"  /setclonelog     — set log group",
-        parse_mode=HTML,
-    )
-
-
-# ─── /setvideochannel ─────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("setvideochannel") & clone_admin_filter & filters.private)
-async def set_video_channel_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
-    if not cfg:
-        await message.reply_text("ℹ️ This command works only in the clone bot.", parse_mode=HTML)
-        return
-
-    args = message.command[1:]
-    if not args:
-        current = cfg.get("video_channel") or "Not set"
-        await message.reply_text(
-            f"📺 <b>Set Video Channel</b>\n\n"
-            f"Current: <code>{current}</code>\n\n"
-            f"Usage: <code>/setvideochannel -1001234567890</code>\n\n"
-            f"Or forward any message from the channel here and I'll detect the ID automatically.",
-            parse_mode=HTML,
-        )
-        return
-
-    ch_id_str = args[0]
-    if not ch_id_str.lstrip("-").isdigit():
-        await message.reply_text("❌ Invalid channel ID.", parse_mode=HTML)
-        return
-
-    ch_id = int(ch_id_str)
-    tok   = cfg.get("token")
-    await clones_col.update_one({"token": tok}, {"$set": {"video_channel": ch_id}})
-    from clone_manager import reload_clone_config
-    await reload_clone_config(tok)
-
-    await message.reply_text(
-        f"✅ <b>Video Channel Set!</b>\n"
-        f"📺 Channel ID: <code>{ch_id}</code>\n\n"
-        f"Videos will now be sent from this channel.",
-        parse_mode=HTML,
-    )
-
-
-# ─── /setcloneinbox ───────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("setcloneinbox") & clone_admin_filter)
-async def set_clone_inbox_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
-    if not cfg:
-        await message.reply_text("ℹ️ This command works only in the clone bot.", parse_mode=HTML)
-        return
-
-    tok = cfg.get("token")
-
-    # Used in group: set that group as inbox
-    if message.chat.type.name in ("GROUP", "SUPERGROUP"):
-        group_id = message.chat.id
-        await clones_col.update_one({"token": tok}, {"$set": {"inbox_group": group_id}})
-        from clone_manager import reload_clone_config
-        await reload_clone_config(tok)
-        m = await message.reply_text(
-            f"✅ <b>Inbox Group Set!</b>\n"
-            f"📬 This group (<code>{group_id}</code>) is now the inbox for <b>{cfg.get('name','clone')}</b>.\n\n"
-            f"User messages will be forwarded here.",
-            parse_mode=HTML,
-        )
-        asyncio.create_task(_auto_del(m, 15))
-        return
-
-    # Used in private: accept ID
-    args = message.command[1:]
-    if not args:
-        current = cfg.get("inbox_group") or "Not set"
-        await message.reply_text(
-            f"📬 <b>Set Inbox Group</b>\n\n"
-            f"Current: <code>{current}</code>\n\n"
-            f"<b>Option 1:</b> Run <code>/setcloneinbox</code> inside the group\n"
-            f"<b>Option 2:</b> <code>/setcloneinbox -1001234567890</code>",
-            parse_mode=HTML,
-        )
-        return
-
-    if not args[0].lstrip("-").isdigit():
-        await message.reply_text("❌ Invalid group ID.", parse_mode=HTML)
-        return
-
-    group_id = int(args[0])
-    await clones_col.update_one({"token": tok}, {"$set": {"inbox_group": group_id}})
-    from clone_manager import reload_clone_config
-    await reload_clone_config(tok)
-
-    await message.reply_text(
-        f"✅ <b>Inbox Group Set!</b>\n📬 Group: <code>{group_id}</code>",
-        parse_mode=HTML,
-    )
-
-
-# ─── /setclonelog ─────────────────────────────────────────────────────────────
-
-@app.on_message(filters.command("setclonelog") & clone_admin_filter)
-async def set_clone_log_cmd(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
-    if not cfg:
-        await message.reply_text("ℹ️ This command works only in the clone bot.", parse_mode=HTML)
-        return
-
-    tok = cfg.get("token")
-
-    # Used in group: set that group as log
-    if message.chat.type.name in ("GROUP", "SUPERGROUP"):
-        group_id = message.chat.id
-        await clones_col.update_one({"token": tok}, {"$set": {"log_group": group_id}})
-        from clone_manager import reload_clone_config
-        await reload_clone_config(tok)
-        m = await message.reply_text(
-            f"✅ <b>Log Group Set!</b>\n"
-            f"📋 This group (<code>{group_id}</code>) will now receive logs for <b>{cfg.get('name','clone')}</b>.",
-            parse_mode=HTML,
-        )
-        asyncio.create_task(_auto_del(m, 15))
-        return
-
-    # Used in private: accept ID
-    args = message.command[1:]
-    if not args:
-        current = cfg.get("log_group") or "Not set"
-        await message.reply_text(
-            f"📋 <b>Set Log Group</b>\n\n"
-            f"Current: <code>{current}</code>\n\n"
-            f"<b>Option 1:</b> Run <code>/setclonelog</code> inside the group\n"
-            f"<b>Option 2:</b> <code>/setclonelog -1001234567890</code>",
-            parse_mode=HTML,
-        )
-        return
-
-    if not args[0].lstrip("-").isdigit():
-        await message.reply_text("❌ Invalid group ID.", parse_mode=HTML)
-        return
-
-    group_id = int(args[0])
-    await clones_col.update_one({"token": tok}, {"$set": {"log_group": group_id}})
-    from clone_manager import reload_clone_config
-    await reload_clone_config(tok)
-
-    await message.reply_text(
-        f"✅ <b>Log Group Set!</b>\n📋 Group: <code>{group_id}</code>",
-        parse_mode=HTML,
-    )
-
-
-# ─── Detect forwarded message to auto-set video channel ───────────────────────
-
-@app.on_message(
-    clone_admin_filter & filters.private & filters.forwarded
-    & ~filters.command(["setvideochannel", "setcloneinbox", "setclonelog", "cloneconfig"])
-)
-async def forward_detect_channel(client: Client, message: Message):
-    cfg = _clone_config_ctx.get()
-    if not cfg:
-        return
-
-    fwd_chat = message.forward_from_chat
-    if not fwd_chat or fwd_chat.type.value not in ("channel",):
-        return
-
-    tok = cfg.get("token")
-    ch_id = fwd_chat.id
-    await clones_col.update_one({"token": tok}, {"$set": {"video_channel": ch_id}})
-    from clone_manager import reload_clone_config
-    await reload_clone_config(tok)
-
-    await message.reply_text(
-        f"✅ <b>Video Channel Auto-Detected!</b>\n"
-        f"📺 <b>{fwd_chat.title}</b>\n"
-        f"🆔 <code>{ch_id}</code>\n\n"
-        f"Videos will now be sent from this channel.",
-        parse_mode=HTML,
-    )
