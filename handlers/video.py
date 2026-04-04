@@ -228,7 +228,7 @@ async def _send_video_to_user(client: Client, user_id: int) -> str:
 async def video_handler_private(client: Client, message: Message):
     from handlers.forcejoin import _check_force_join, _fj_join_buttons
     user_id    = message.from_user.id
-    not_joined = await _check_force_join(user_id)
+    not_joined = await _check_force_join(user_id, client)
 
     if not_joined:
         await message.reply_text(
