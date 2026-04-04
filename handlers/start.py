@@ -29,9 +29,9 @@ def _fj_import_guard(_, __, message: Message) -> bool:
     return True
 
 
-async def _check_force_join_import(user_id: int):
+async def _check_force_join_import(user_id: int, client=None):
     from handlers.forcejoin import _check_force_join
-    return await _check_force_join(user_id)
+    return await _check_force_join(user_id, client)
 
 
 async def _fj_join_buttons_import(not_joined: list):
@@ -66,7 +66,7 @@ async def start_handler(client: Client, message: Message):
 
     if from_video:
         from handlers.forcejoin import _check_force_join, _fj_join_buttons
-        not_joined = await _check_force_join(user.id)
+        not_joined = await _check_force_join(user.id, client)
         if not_joined:
             await message.reply_text(
                 "📢 JOIN REQUIRED\n"
