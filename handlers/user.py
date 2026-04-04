@@ -4,11 +4,11 @@ import asyncio
 from datetime import datetime, timedelta
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import (
-    HTML, ADMIN_ID, DAILY_VIDEO_LIMIT,
-    users_col, videos_col, vid_hist_col,
+    HTML, ADMIN_ID, DAILY_VIDEO_LIMIT, PACKAGES,
+    users_col, videos_col, vid_hist_col, premium_col,
     app,
 )
 from helpers import get_bot_username, get_rank, get_status, log_event, bot_api
@@ -379,3 +379,131 @@ async def clearhistory_cmd(client: Client, message: Message):
         parse_mode=HTML,
     )
     print(f"[ADMIN] Cleared video history for user={target_id} ({deleted} entries deleted)")
+
+
+@app.on_message(filters.command("profile") & filters.private)
+async def profile_cmd(client: Client, message: Message):
+    from datetime import timezone
+    user_id    = message.from_user.id
+    doc        = await users_col.find_one({"user_id": user_id})
+    if not doc:
+        await message.reply_text("❌ Profile not found. Please /start first.")
+        return
+
+    ref_count  = doc.get("ref_count", 0)
+    points     = doc.get("points", 0)
+    joined_at  = doc.get("joined_at")
+    joined_str = joined_at.strftime("%d %b %Y") if joined_at else "—"
+    bot_uname  = await get_bot_username(client)
+
+    today     = datetime.utcnow().strftime("%Y-%m-%d")
+    vid_date  = doc.get("video_date", "")
+    vid_count = doc.get("video_count", 0) if vid_date == today else 0
+
+    last_daily = doc.get("last_daily")
+    now        = datetime.utcnow()
+    if last_daily and (now - last_daily).total_seconds() < 86400:
+        rem_secs   = 86400 - int((now - last_daily).total_seconds())
+        hrs, r     = divmod(rem_secs, 3600)
+        daily_line = f"📅 Daily Bonus: claimed (next in {hrs}h {r//60}m)"
+    else:
+        daily_line = "📅 Daily Bonus: available ✅  →  /daily"
+
+    rank     = get_rank(ref_count)
+    status   = get_status(points)
+    ref_link = f"https://t.me/{bot_uname}?start={user_id}"
+
+    prem_doc = await premium_col.find_one({"user_id": user_id})
+    raw_lim  = doc.get("video_limit")
+    if prem_doc:
+        exp = prem_doc.get("expires_at")
+        if exp and exp.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc):
+            pkg_info  = PACKAGES.get(prem_doc["package"], {})
+            prem_lim  = prem_doc.get("video_limit", 0)
+            lim_str   = "∞" if prem_lim >= 999 else str(prem_lim)
+            rem_days  = (exp.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
+            prem_line = (
+                "\n💎 PREMIUM MEMBERSHIP:\n"
+                f"   Package  : {pkg_info.get('label', prem_doc['package'])}\n"
+                f"   Expires  : {exp.strftime('%d %b %Y')}  ({rem_days}d left)\n"
+                f"   Vid/day  : {lim_str}\n"
+            )
+        else:
+            await premium_col.delete_one({"user_id": user_id})
+            prem_line = ""
+            if raw_lim == -1:
+                lim_str = "∞ (Admin)"
+            elif isinstance(raw_lim, int) and raw_lim > 0:
+                lim_str = str(raw_lim)
+            else:
+                lim_str = str(DAILY_VIDEO_LIMIT)
+    else:
+        prem_line = ""
+        if raw_lim == -1:
+            lim_str = "∞ (Admin)"
+        elif isinstance(raw_lim, int) and raw_lim > 0:
+            lim_str = str(raw_lim)
+        else:
+            lim_str = str(DAILY_VIDEO_LIMIT)
+
+    await message.reply_text(
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "👤 MY PROFILE — 𝑫𝑬𝑺𝑰 𝑴𝑳𝑯\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 ID       : {user_id}\n"
+        f"📅 Joined   : {joined_str}\n"
+        f"{prem_line}"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "📊 STATISTICS:\n"
+        f"💰 Points   : {points}\n"
+        f"👥 Referrals: {ref_count}\n"
+        f"🏅 Rank     : {rank}\n"
+        f"✨ Status   : {status}\n\n"
+        f"📹 Videos Today : {vid_count}/{lim_str}\n"
+        f"{daily_line}\n\n"
+        f"🔗 Referral Link:\n{ref_link}\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "🤖 DESI MLH SYSTEM",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("💎 Buy Premium", callback_data="open_buypremium"),
+        ]]),
+    )
+
+
+@app.on_message(filters.command("resetcount") & filters.user(ADMIN_ID) & filters.private)
+async def resetcount_handler(client: Client, message: Message):
+    args = message.command[1:]
+    if not args:
+        await message.reply_text(
+            "Usage:\n"
+            "/resetcount @username\n"
+            "/resetcount 123456789"
+        )
+        return
+    raw = args[0].lstrip("@")
+    doc = (
+        await users_col.find_one({"user_id": int(raw)})
+        if raw.isdigit()
+        else await users_col.find_one({"username": raw})
+    )
+    if not doc:
+        await message.reply_text("❌ User not found.")
+        return
+    target_id = doc["user_id"]
+    fname     = doc.get("first_name") or str(target_id)
+    await users_col.update_one(
+        {"user_id": target_id},
+        {"$set": {"video_count": 0, "video_date": ""}},
+    )
+    await message.reply_text(
+        "✅ VIDEO COUNT RESET\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 User : {fname}\n"
+        f"🆔 ID   : <code>{target_id}</code>\n"
+        "📹 Today's count set to 0.\n"
+        "User can now watch videos again.\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🤖 DESI MLH SYSTEM",
+        parse_mode=HTML,
+    )
+    print(f"[ADMIN] resetcount user={target_id}")
