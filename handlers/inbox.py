@@ -195,6 +195,27 @@ async def user_msg_to_inbox(client: Client, message: Message):
                 "group_id":      inbox_id,
             })
             print(f"[INBOX] user={user.id} fwd→ group={inbox_id} fwd_msg={fwd_msg_id}")
+
+            msg_preview = (message.text or message.caption or "")[:80]
+            msg_type = (
+                "📷 Photo" if message.photo else
+                "🎬 Video" if message.video else
+                "🎵 Voice" if message.voice else
+                "📄 Document" if message.document else
+                "🎭 Sticker" if message.sticker else
+                f"✉️ {msg_preview!r}" if msg_preview else
+                "📎 Media"
+            )
+            asyncio.create_task(log_event(client,
+                f"💬 <b>User Inbox Message</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🔔 User   : {mention}\n"
+                f"🆔 ID     : <code>{user.id}</code>\n"
+                f"📛 Handle : {uname}\n"
+                f"📨 Type   : {msg_type}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🤖 DESI MLH SYSTEM"
+            ))
         else:
             print(f"[INBOX] Forward failed: {fwd_resp}")
 
