@@ -110,7 +110,7 @@ async def _set_permissions(chat_id: int, perms: dict) -> tuple[bool, str]:
     return False, desc
 
 
-@app.on_message(filters.command("nightmode") & (filters.group | filters.supergroup))
+@app.on_message(filters.command("nightmode") & filters.group)
 async def nightmode_cmd(client: Client, message: Message):
     if not await _is_admin_msg(client, message):
         await message.reply_text(
