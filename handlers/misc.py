@@ -221,7 +221,8 @@ async def grp_btn_callback(client: Client, cq: CallbackQuery):
         "shadowban", "unshadowban", "shadowbans", "clearshadowbans",
         "addfilter", "delfilter", "filters", "clearfilters",
         "antiflood", "welcome", "setrules", "rules", "clearrules",
-        "mute", "unmute", "ban", "unban", "warn", "clearwarn",
+        "mute", "unmute", "ban", "unban", "warn", "clearwarn", "warns",
+        "kick", "del", "ro", "pin", "unpin", "report",
         "chat", "inbox", "groups",
     ])
 )

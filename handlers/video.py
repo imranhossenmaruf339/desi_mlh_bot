@@ -221,24 +221,77 @@ async def video_handler_private(client: Client, message: Message):
 
 @app.on_message(filters.command("video") & filters.group)
 async def video_handler_group(client: Client, message: Message):
-    bot_uname = await get_bot_username(client)
+    user       = message.from_user
+    fname      = (user.first_name or "User") if user else "User"
+    user_id    = user.id if user else 0
+    bot_uname  = await get_bot_username(client)
+
+    doc        = await users_col.find_one({"user_id": user_id}) if user_id else {}
+    doc        = doc or {}
+    today      = datetime.utcnow().strftime("%Y-%m-%d")
+    vid_date   = doc.get("video_date", "")
+    vid_count  = doc.get("video_count", 0) if vid_date == today else 0
+
+    from datetime import timezone
+    prem_doc   = await premium_col.find_one({"user_id": user_id}) if user_id else None
+    if prem_doc:
+        exp = prem_doc.get("expires_at")
+        if exp and exp.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc):
+            raw_limit = prem_doc.get("video_limit", DAILY_VIDEO_LIMIT)
+            pkg_key   = prem_doc.get("package", "")
+            from config import PACKAGES
+            pkg_label = PACKAGES.get(pkg_key, {}).get("label", "Premium")
+            badge     = f"💎 {pkg_label}"
+        else:
+            await premium_col.delete_one({"user_id": user_id})
+            raw_limit = doc.get("video_limit") or DAILY_VIDEO_LIMIT
+            badge     = "👤 Free"
+    else:
+        raw_limit = doc.get("video_limit") or DAILY_VIDEO_LIMIT
+        badge     = "👤 Free"
+
+    is_unlimited = (raw_limit == -1 or (isinstance(raw_limit, int) and raw_limit >= 999))
+    if is_unlimited:
+        limit_str = "♾️ Unlimited"
+        remaining = "♾️"
+    else:
+        limit_str = str(raw_limit)
+        remaining = str(max(0, raw_limit - vid_count))
+
+    total_vids = await videos_col.count_documents({})
+    mention    = f'<a href="tg://user?id={user_id}">{fname}</a>' if user_id else fname
+
     btn = InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "🎬 Watch Video Now!",
-            url=f"https://t.me/{bot_uname}?start=video"
-        )
+        InlineKeyboardButton("🎬 Get My Video Now", url=f"https://t.me/{bot_uname}?start=video"),
+        InlineKeyboardButton("💎 Buy Premium",     callback_data="open_buypremium"),
     ]])
+
     grp_msg = await message.reply_text(
-        "🎬 DESI MLH VIDEO\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📹 Click the button below to receive\n"
-        "a video directly in the bot! 👇\n"
-        "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🤖 DESI MLH SYSTEM",
+        f"╔══════════════════════╗\n"
+        f"      🎬 𝑫𝑬𝑺𝑰 𝑴𝑳𝑯 𝑽𝑰𝑫𝑬𝑶\n"
+        f"╚══════════════════════╝\n\n"
+        f"👋 Hey {mention}!\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 YOUR STATUS:\n"
+        f"   🏷 Account   : {badge}\n"
+        f"   📹 Used Today: {vid_count} / {limit_str}\n"
+        f"   🎯 Remaining : {remaining} videos\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎞 VIDEO LIBRARY:\n"
+        f"   📦 Total Videos : {total_vids:,}\n"
+        f"   🔒 Spoiler Protected\n"
+        f"   ⏳ Auto-Deleted in 25 min\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👇 Tap the button below to\n"
+        f"   receive your video in DM!\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 DESI MLH SYSTEM",
         reply_markup=btn,
+        parse_mode=HTML,
     )
+
     async def _del():
-        await asyncio.sleep(60)
+        await asyncio.sleep(90)
         try:
             await grp_msg.delete()
             await message.delete()
@@ -276,7 +329,7 @@ async def channel_post_handler(client: Client, message: Message):
             return
         from datetime import datetime as _dt
         now = _dt.utcnow().strftime("%Y-%m-%d %H:%M") + " UTC"
-        caption = (
+        text = (
             f"🗒 <b>LOG</b> | {now}\n\n"
             f"🎬 <b>New Video Posted in Channel</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -287,23 +340,11 @@ async def channel_post_handler(client: Client, message: Message):
             f"🤖 DESI MLH SYSTEM"
         )
         try:
-            fwd = await _bot_api("forwardMessage", {
-                "chat_id":      log_ch,
-                "from_chat_id": VIDEO_CHANNEL,
-                "message_id":   message.id,
+            await _bot_api("sendMessage", {
+                "chat_id":    log_ch,
+                "text":       text,
+                "parse_mode": "HTML",
             })
-            if fwd.get("ok"):
-                await _bot_api("sendMessage", {
-                    "chat_id":    log_ch,
-                    "text":       caption,
-                    "parse_mode": "HTML",
-                })
-            else:
-                await _bot_api("sendMessage", {
-                    "chat_id":    log_ch,
-                    "text":       caption,
-                    "parse_mode": "HTML",
-                })
         except Exception as e:
             print(f"[VIDEO LOG] Failed: {e}")
 
