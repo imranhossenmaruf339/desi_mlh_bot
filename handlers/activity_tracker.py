@@ -1,16 +1,16 @@
 """
 Chat Monitor Group System
 ──────────────────────────
-Group messages go to a dedicated MONITOR GROUP (separate from inbox & log).
-Admin can reply there → bot DMs the original user.
+• All group messages (text + media) → Monitor Group
+• Admin replies in Monitor Group  → bot DMs the original user
+• Works for BOTH main bot and clone bot groups
+• Log Group  = bot operational logs only (no group chat)
+• Inbox Group = private DMs only (unchanged)
 
 Setup:
-  1. Add bot to your dedicated monitor group as admin
-  2. Send /setmonitorgroup in that group
-
-Log group  → bot operational logs only (bot added/removed, errors)
-Inbox group → private DMs from users (unchanged)
-Monitor group → all group chat messages + reply-to-user feature
+  1. Create a dedicated Telegram group (e.g. "Chat Monitor")
+  2. Add the bot as admin
+  3. Send /setmonitorgroup in that group
 """
 import asyncio
 from datetime import datetime
@@ -19,12 +19,10 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 
 from config import app, HTML, settings_col, clones_col
-from helpers import (
-    log_event, _is_admin_msg, _auto_del,
-    get_cfg, _clone_config_ctx, BOT_TOKEN,
-)
+from helpers import _is_admin_msg, _auto_del, get_cfg, _clone_config_ctx
 
-# ── MongoDB collection for monitor message mappings ───────────────────────────
+
+# ── MongoDB: monitor message mappings ─────────────────────────────────────────
 _monitor_col = None
 
 
@@ -39,19 +37,24 @@ def _mon_col():
 # ── Clone-aware monitor group helpers ─────────────────────────────────────────
 
 async def _get_monitor_group(client=None) -> int | None:
-    """Return monitor group chat_id (clone-aware, same priority chain as inbox)."""
+    """Clone-aware: clone config → settings_col fallback."""
+    # 1. client attribute (clone bot via injector)
     if client is not None:
-        cfg = getattr(client, "_clone_config", None) or _clone_config_ctx.get()
+        cfg = getattr(client, "_clone_config", None)
         if cfg and cfg.get("monitor_group"):
-            return cfg["monitor_group"]
+            return int(cfg["monitor_group"])
+    # 2. ContextVar (injector sets this per message)
     clone_mg = get_cfg("monitor_group")
     if clone_mg:
-        return clone_mg
+        return int(clone_mg)
+    # 3. Main bot's global setting
     doc = await settings_col.find_one({"key": "chat_monitor_group"})
-    return doc.get("chat_id") if doc else None
+    if doc and doc.get("chat_id"):
+        return int(doc["chat_id"])
+    return None
 
 
-async def _set_monitor_group(chat_id: int, client=None):
+async def _set_monitor_group(chat_id: int):
     """Save monitor group (clone-aware)."""
     cfg = _clone_config_ctx.get()
     if cfg:
@@ -81,18 +84,20 @@ def _link(user) -> str:
     return f'<a href="tg://user?id={uid}">{name}</a>'
 
 
-# ── /setmonitorgroup  — run inside the desired monitor group ──────────────────
+# ── /setmonitorgroup — run inside the dedicated monitor group ─────────────────
 
 @app.on_message(filters.command("setmonitorgroup") & filters.group)
 async def set_monitor_group_cmd(client: Client, message: Message):
     if not await _is_admin_msg(client, message):
         return
     chat_id = message.chat.id
-    await _set_monitor_group(chat_id, client)
+    await _set_monitor_group(chat_id)
     m = await message.reply_text(
-        f"✅ <b>Monitor group set!</b>\n"
+        f"✅ <b>Monitor Group Set!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📍 Group: <code>{chat_id}</code>\n"
         f"All group messages will now be forwarded here.\n"
-        f"Reply to any forwarded message to DM that user.",
+        f"Reply to any message to DM the original user.",
         parse_mode=HTML,
     )
     asyncio.create_task(_auto_del(m, 30))
@@ -102,9 +107,11 @@ async def set_monitor_group_cmd(client: Client, message: Message):
         pass
 
 
-# ── Forward group messages → monitor group ────────────────────────────────────
+# ── Forward ALL group messages → Monitor Group ────────────────────────────────
+# Covers: text, photo, video, voice, sticker, document, audio, animation.
+# Excluded: service messages, bot messages, /commands, monitor group itself.
 
-_MEDIA_FILTER = (
+_CONTENT_FILTER = (
     filters.text
     | filters.photo
     | filters.video
@@ -118,24 +125,30 @@ _MEDIA_FILTER = (
 
 
 @app.on_message(
-    filters.group & ~filters.service & _MEDIA_FILTER,
-    group=25,
+    filters.group & ~filters.service & _CONTENT_FILTER,
+    group=8,
 )
 async def forward_to_monitor(client: Client, message: Message):
+    # Must be a real user
     if not message.from_user:
         return
     if message.from_user.is_bot:
         return
-    if (message.text or "").startswith("/"):
+    # Skip commands
+    if (message.text or message.caption or "").lstrip().startswith("/"):
         return
 
     monitor_id = await _get_monitor_group(client)
     if not monitor_id:
         return
 
+    # Don't forward messages FROM the monitor group itself (avoid noise)
+    if message.chat.id == monitor_id:
+        return
+
     user  = message.from_user
     uid   = user.id
-    uname = f"@{user.username}" if user.username else "no username"
+    uname = f"@{user.username}" if user.username else "—"
     name  = user.first_name or "User"
     chat  = message.chat.title or str(message.chat.id)
 
@@ -147,29 +160,39 @@ async def forward_to_monitor(client: Client, message: Message):
         f"📍 {chat}\n"
         f"🕒 {_now()}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Reply here to DM this user</i>"
+        f"<i>↩️ Reply here to DM this user</i>"
     )
 
     try:
         header_msg = await client.send_message(monitor_id, header, parse_mode=HTML)
-        fwd_msg    = await message.forward(monitor_id)
 
-        # Store mapping so admin replies can reach the user
+        # copy_message preserves content without forwarding restrictions
+        copied = await client.copy_message(
+            chat_id=monitor_id,
+            from_chat_id=message.chat.id,
+            message_id=message.id,
+        )
+
+        # Store mapping: monitor_msg_id → user_id
         await _mon_col().insert_one({
             "header_msg_id":  header_msg.id,
-            "forward_msg_id": fwd_msg.id if fwd_msg else None,
+            "copied_msg_id":  copied.id if copied else None,
             "user_id":        uid,
+            "user_name":      name,
             "group_title":    chat,
+            "group_id":       message.chat.id,
             "monitor_id":     monitor_id,
             "created_at":     datetime.utcnow(),
         })
+        print(f"[MONITOR] Forwarded msg from {uid} in '{chat}' → monitor {monitor_id}")
+
     except Exception as exc:
-        print(f"[MONITOR] Forward failed: {exc}")
+        print(f"[MONITOR] Forward failed from {message.chat.id}: {exc}")
 
 
-# ── Admin replies in monitor group → DM to original user ─────────────────────
+# ── Admin replies in Monitor Group → DM to original user ─────────────────────
 
-@app.on_message(filters.reply & filters.group, group=12)
+@app.on_message(filters.reply & filters.group, group=9)
 async def monitor_reply_handler(client: Client, message: Message):
     if not message.from_user:
         return
@@ -178,7 +201,7 @@ async def monitor_reply_handler(client: Client, message: Message):
     if not monitor_id or message.chat.id != monitor_id:
         return
 
-    # Only admins can reply
+    # Only admins can send replies
     if not await _is_admin_msg(client, message):
         return
 
@@ -186,40 +209,42 @@ async def monitor_reply_handler(client: Client, message: Message):
     if not replied_id:
         return
 
-    # Find original user from either header or forwarded message
+    # Find original user from DB (check both header and copied message IDs)
     doc = await _mon_col().find_one({
         "$or": [
-            {"header_msg_id":  replied_id},
-            {"forward_msg_id": replied_id},
-        ]
+            {"header_msg_id": replied_id},
+            {"copied_msg_id": replied_id},
+        ],
+        "monitor_id": monitor_id,
     })
     if not doc:
-        return   # Not a monitored message — ignore
+        return  # Not a tracked group message — ignore silently
 
     user_id     = doc["user_id"]
-    group_title = doc.get("group_title", "the group")
-    admin_name  = message.from_user.first_name or "Admin"
+    group_title = doc.get("group_title", "a group")
 
-    # Send admin's reply to user as DM
+    intro = (
+        f"📩 <b>Reply from Admin</b>\n"
+        f"<i>(regarding your message in {group_title})</i>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
     try:
-        intro = (
-            f"📩 <b>Message from admin</b>\n"
-            f"<i>(regarding your message in {group_title})</i>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        )
         await client.send_message(user_id, intro, parse_mode=HTML)
-        await message.copy(user_id)
-
-        # Confirm to admin
+        await client.copy_message(
+            chat_id=user_id,
+            from_chat_id=message.chat.id,
+            message_id=message.id,
+        )
         confirm = await message.reply_text(
-            f"✅ Reply sent to user <code>{user_id}</code>.",
+            f"✅ Sent to user <code>{user_id}</code>",
             parse_mode=HTML,
         )
-        asyncio.create_task(_auto_del(confirm, 10))
+        asyncio.create_task(_auto_del(confirm, 8))
     except Exception as exc:
         err = await message.reply_text(
-            f"❌ Could not DM user <code>{user_id}</code>: {exc}",
+            f"❌ Could not DM <code>{user_id}</code>: <code>{exc}</code>",
             parse_mode=HTML,
         )
         asyncio.create_task(_auto_del(err, 20))
-        print(f"[MONITOR] Reply DM failed: {exc}")
+        print(f"[MONITOR] Reply DM failed to {user_id}: {exc}")
