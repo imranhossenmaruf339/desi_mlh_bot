@@ -1,6 +1,7 @@
 import asyncio
 
-from pyrogram import idle as pyrogram_idle
+from pyrogram import filters, idle as pyrogram_idle
+from pyrogram.types import Message
 
 from config import app, VIDEO_CHANNEL
 from helpers import get_log_channel
@@ -8,7 +9,35 @@ import handlers  # noqa: F401 — registers all handlers via @app decorators
 from tasks import schedule_loop, video_del_loop
 from handlers.nightmode import nightmode_loop
 from handlers.stars_payment import stars_payment_loop
-from clone_manager import start_all_clones
+from clone_manager import start_all_clones, main_bot_mark_active_in
+
+
+# ── Group presence tracker (group=-95) ────────────────────────────────────────
+# Every time the main bot processes a group message, record that chat_id in the
+# in-process set so clone bots immediately know the main bot is there.
+# This runs BEFORE all feature handlers so the set is populated early.
+@app.on_message(filters.group, group=-95)
+async def _main_bot_group_tracker(client, message: Message):
+    if message.chat:
+        main_bot_mark_active_in(message.chat.id)
+
+
+async def _preload_main_bot_groups():
+    """Pre-populate _main_bot_groups at startup by iterating dialogs.
+    Runs in the background so it doesn't block startup.
+    """
+    count = 0
+    try:
+        async for dialog in app.get_dialogs():
+            chat = dialog.chat
+            if chat and hasattr(chat, "type"):
+                t = chat.type.value if hasattr(chat.type, "value") else str(chat.type)
+                if t in ("group", "supergroup"):
+                    main_bot_mark_active_in(chat.id)
+                    count += 1
+        print(f"[CLONE_GUARD] Pre-loaded {count} group(s) — clone bots will be silenced there.")
+    except Exception as e:
+        print(f"[CLONE_GUARD] WARNING: Could not pre-load groups: {e}")
 
 
 async def main():
@@ -48,6 +77,9 @@ async def main():
 
     await start_all_clones()
     print("[CLONE] Clone startup complete.")
+
+    # Pre-load groups where main bot is present (silences clone bots immediately)
+    asyncio.get_event_loop().create_task(_preload_main_bot_groups())
 
     await pyrogram_idle()
     await app.stop()
