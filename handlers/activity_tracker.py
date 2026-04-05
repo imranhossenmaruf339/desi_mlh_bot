@@ -38,6 +38,11 @@ _fwd_dedup: dict[tuple, float] = {}
 # ── Group DM sessions ─────────────────────────────────────────────────────────
 _groupdm_sessions: dict[int, dict] = {}  # admin_id → session
 
+# ── Reply-in-Group sessions ────────────────────────────────────────────────────
+# Key = prompt_msg_id sent by bot in monitor group
+# Value = {group_id, group_title, monitor_id}
+_greply_prompts: dict[int, dict] = {}
+
 
 def _mon_col():
     global _monitor_col
@@ -337,11 +342,16 @@ async def forward_to_monitor(client: Client, message: Message):
     group_id   = message.chat.id
     group_title = message.chat.title or str(group_id)
 
-    # ── Minimal header: just the group name, no user info ─────────────────────
+    # ── Minimal header: group name + "Reply in Group" button ──────────────────
     header = f"📍 <b>{group_title}</b>"
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📢 Reply in Group", callback_data=f"mgr:{group_id}"),
+    ]])
 
     try:
-        header_msg = await client.send_message(monitor_id, header, parse_mode=HTML)
+        header_msg = await client.send_message(
+            monitor_id, header, parse_mode=HTML, reply_markup=keyboard
+        )
         copied = await client.copy_message(
             chat_id=monitor_id,
             from_chat_id=message.chat.id,
@@ -362,7 +372,47 @@ async def forward_to_monitor(client: Client, message: Message):
         print(f"[MONITOR] Forward failed from {group_id}: {exc}")
 
 
-# ── Admin replies in Monitor Group → DM original user ────────────────────────
+# ── "Reply in Group" button callback ─────────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r"^mgr:"))
+async def monitor_greply_cb(client: Client, cq: CallbackQuery):
+    """Admin clicks 'Reply in Group' on a monitor header → bot sends a prompt."""
+    uid = cq.from_user.id if cq.from_user else 0
+    if uid != ADMIN_ID:
+        from config import admins_col
+        is_admin = await admins_col.find_one({"user_id": uid, "active": True})
+        if not is_admin:
+            await cq.answer("❌ Admins only.", show_alert=True)
+            return
+
+    group_id = int(cq.data.split(":", 1)[1])
+    monitor_id = await _get_monitor_group(client)
+    if not monitor_id:
+        await cq.answer("Monitor group not set.", show_alert=True)
+        return
+
+    # Fetch group title from DB
+    doc = await groups_col.find_one({"chat_id": group_id})
+    group_title = (doc or {}).get("title", str(group_id))
+
+    try:
+        prompt = await client.send_message(
+            monitor_id,
+            f"✏️ <b>Reply to this message</b> with what you want to send to:\n"
+            f"📍 <b>{group_title}</b>",
+            parse_mode=HTML,
+        )
+        _greply_prompts[prompt.id] = {
+            "group_id":    group_id,
+            "group_title": group_title,
+            "monitor_id":  monitor_id,
+        }
+        await cq.answer("Send your reply now ↑", show_alert=False)
+    except Exception as exc:
+        await cq.answer(f"Error: {exc}", show_alert=True)
+
+
+# ── Admin replies in Monitor Group → DM user OR send to original group ────────
 
 @app.on_message(filters.reply & filters.group, group=9)
 async def monitor_reply_handler(client: Client, message: Message):
@@ -380,6 +430,29 @@ async def monitor_reply_handler(client: Client, message: Message):
     if not replied_id:
         return
 
+    # ── PATH A: Admin replied to a "Reply in Group" prompt → send to group ────
+    greply = _greply_prompts.pop(replied_id, None)
+    if greply:
+        target_group = greply["group_id"]
+        group_title  = greply["group_title"]
+        try:
+            await client.copy_message(
+                chat_id=target_group,
+                from_chat_id=message.chat.id,
+                message_id=message.id,
+            )
+            confirm = await message.reply_text(
+                f"✅ Sent to group <b>{group_title}</b>", parse_mode=HTML
+            )
+            asyncio.create_task(_auto_del(confirm, 8))
+        except Exception as exc:
+            err = await message.reply_text(
+                f"❌ Failed to send to group: <code>{exc}</code>", parse_mode=HTML
+            )
+            asyncio.create_task(_auto_del(err, 20))
+        return  # Done — don't also DM the user
+
+    # ── PATH B: Admin replied to a forwarded message → DM original user ───────
     doc = await _mon_col().find_one({
         "$or": [
             {"header_msg_id": replied_id},
@@ -406,7 +479,7 @@ async def monitor_reply_handler(client: Client, message: Message):
             message_id=message.id,
         )
         confirm = await message.reply_text(
-            f"✅ Sent to <code>{user_id}</code>", parse_mode=HTML
+            f"✅ DM sent to <code>{user_id}</code>", parse_mode=HTML
         )
         asyncio.create_task(_auto_del(confirm, 8))
     except Exception as exc:
@@ -613,15 +686,21 @@ async def groupstats_cmd(client: Client, message: Message):
 
     await message.reply_text("📊 Fetching group stats…", parse_mode=HTML)
 
-    # ── Fetch all groups from DB ──────────────────────────────────────────────
-    docs = await groups_col.find({}).sort("updated_at", -1).to_list(length=None)
+    # ── Fetch all groups — sorted by member_count desc ────────────────────────
+    docs = await groups_col.find({}).sort("member_count", -1).to_list(length=None)
+    # Put docs without member_count at the end
+    docs_with = [d for d in docs if d.get("member_count") is not None]
+    docs_without = [d for d in docs if d.get("member_count") is None]
+    docs = docs_with + docs_without
     total = len(docs)
+
     if total == 0:
         await message.reply_text("📭 Bot is not in any groups yet.", parse_mode=HTML)
         return
 
-    admin_count    = sum(1 for d in docs if d.get("bot_is_admin"))
-    non_admin      = total - admin_count
+    admin_count   = sum(1 for d in docs if d.get("bot_is_admin"))
+    non_admin     = total - admin_count
+    total_members = sum(d.get("member_count") or 0 for d in docs)
 
     # ── Fetch per-group trackchats settings ──────────────────────────────────
     trk_docs = await _trk_col().find({}).to_list(length=None)
@@ -632,32 +711,30 @@ async def groupstats_cmd(client: Client, message: Message):
         f"📊 <b>Group Statistics</b>",
         f"━━━━━━━━━━━━━━━━━━━━━━",
         f"📌 <b>Total Groups:</b> {total}",
-        f"👑 <b>Bot is Admin:</b> {admin_count}   |   👤 <b>Not Admin:</b> {non_admin}",
+        f"👑 <b>Bot is Admin:</b> {admin_count}   👤 <b>Not Admin:</b> {non_admin}",
+        f"👥 <b>Total Members:</b> {total_members:,}",
         f"",
-        f"<b>Top Groups</b> (by activity):",
+        f"<b>Groups (largest first):</b>",
         f"━━━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    # ── Per-group list (max 20) ───────────────────────────────────────────────
-    shown = docs[:20]
-    for i, d in enumerate(shown, 1):
-        cid   = d.get("chat_id", "?")
-        title = (d.get("title") or str(cid))[:28]
+    # ── Per-group list (max 25) ───────────────────────────────────────────────
+    for i, d in enumerate(docs[:25], 1):
+        cid      = d.get("chat_id", "?")
+        title    = (d.get("title") or str(cid))[:25]
+        members  = d.get("member_count")
+        cnt_str  = f"{members:,}" if members is not None else "?"
         is_admin = "👑" if d.get("bot_is_admin") else "👤"
         tracking = trk_map.get(cid, True)
         trk_icon = "📡" if tracking else "🔇"
-        lines.append(f"{i}. {is_admin}{trk_icon} <b>{title}</b>  <code>{cid}</code>")
+        lines.append(f"{i}. {is_admin}{trk_icon} <b>{title}</b>  👥{cnt_str}")
 
-    if total > 20:
-        lines.append(f"\n<i>…and {total - 20} more groups.</i>")
+    if total > 25:
+        lines.append(f"\n<i>…and {total - 25} more groups.</i>")
 
     lines += [
         f"",
-        f"<b>Legend:</b>",
-        f"👑 Bot is admin  👤 Not admin",
-        f"📡 Tracking ON   🔇 Tracking OFF",
-        f"",
-        f"<i>Use /trackchats on|off inside a group to toggle tracking.</i>",
+        f"<b>Legend:</b> 👑admin 👤not-admin 📡tracking-on 🔇tracking-off",
     ]
 
     await message.reply_text("\n".join(lines), parse_mode=HTML)
