@@ -16,6 +16,7 @@ import re
 
 import aiohttp
 from pyrogram import Client, filters
+from pyrogram.enums import ChatAction
 from pyrogram.types import Message
 
 from config import app
@@ -106,7 +107,10 @@ async def _send_ai_reply(client: Client, message: Message, text: str):
     if not text:
         text = "Hello"
     lang  = _detect_lang(text)
-    await client.send_chat_action(message.chat.id, "typing")
+    try:
+        await client.send_chat_action(message.chat.id, ChatAction.TYPING)
+    except Exception:
+        pass
     reply = await _gemini(text, lang)
     if not reply:
         if not GEMINI_KEY:
