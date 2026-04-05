@@ -18,4 +18,7 @@ from handlers import (
     admin_mgmt,
     clone,
     user_antispam,
+    ai_reply,
+    autotag,
+    activity_tracker,
 )
