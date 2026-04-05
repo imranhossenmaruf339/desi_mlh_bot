@@ -228,6 +228,8 @@ async def grp_btn_callback(client: Client, cq: CallbackQuery):
         "addadmin", "removeadmin", "admins",
         "addclone", "removeclone", "clones",
         "cloneconfig", "setvideochannel", "setcloneinbox", "setclonelog", "setupclone",
+        "setmonitorgroup", "monitorstatus", "trackchats", "groupstats",
+        "packages", "setprice",
     ])
 )
 async def admin_message_handler(client: Client, message: Message):
