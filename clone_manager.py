@@ -9,43 +9,81 @@ from helpers import _bot_token_ctx, _clone_config_ctx
 _active_clones:  dict[str, Client] = {}
 _clone_configs:  dict[str, dict]   = {}   # token → full DB doc (in-memory cache)
 
-# ── Main bot presence cache for group priority ─────────────────────────────
-# chat_id → True (main bot present) | False (not present)
-# Cached per session; invalidated when main bot joins/leaves a group.
-_main_bot_presence: dict[int, bool] = {}
+# ── Main bot presence tracking ─────────────────────────────────────────────
+# Two-layer:
+#   _main_bot_groups  — fast in-process set, filled as main bot processes msgs
+#   _main_bot_presence — slower cache filled by API lookup on first miss
+#
+# Clone priority guard checks _main_bot_groups first (no I/O), then falls
+# back to an API call using the MAIN bot's own session (reliable: a bot can
+# always look up its own membership status).
+_main_bot_groups:   set[int]       = set()   # groups main bot is known-present in
+_main_bot_presence: dict[int, bool] = {}     # chat_id → True/False (API cache)
 
 
 def invalidate_presence_cache(chat_id: int | None = None):
     """Clear the presence cache for a specific group (or all groups)."""
     if chat_id is None:
         _main_bot_presence.clear()
+        _main_bot_groups.clear()
     else:
         _main_bot_presence.pop(chat_id, None)
+        _main_bot_groups.discard(chat_id)
+
+
+def main_bot_mark_active_in(chat_id: int):
+    """Called whenever the main bot handles a message in a group.
+    Keeps _main_bot_groups up-to-date with no API cost.
+    """
+    _main_bot_groups.add(chat_id)
+    _main_bot_presence[chat_id] = True
+
+
+def main_bot_mark_left(chat_id: int):
+    """Called when the main bot leaves or is removed from a group."""
+    _main_bot_groups.discard(chat_id)
+    _main_bot_presence[chat_id] = False
 
 
 async def _is_main_bot_in_chat(clone_client: Client, chat_id: int) -> bool:
     """True if the main bot is an active member of chat_id.
-    Result is cached; use invalidate_presence_cache() to refresh.
+
+    Priority:
+      1. In-process set  (_main_bot_groups)  — O(1), no network
+      2. Presence cache  (_main_bot_presence) — already-fetched result
+      3. API lookup via the MAIN bot's own Pyrogram session — always reliable
+         because a bot can always retrieve its own membership status.
+         (Using the clone bot's session fails when clone is not an admin.)
     """
+    # ── Fast path: already known present ──────────────────────────────────
+    if chat_id in _main_bot_groups:
+        return True
+
+    # ── Cache path: previously resolved ───────────────────────────────────
     if chat_id in _main_bot_presence:
         return _main_bot_presence[chat_id]
 
+    # ── Slow path: ask Telegram using the main bot's own session ──────────
     import config as _cfg
     main_id = getattr(_cfg, "MAIN_BOT_ID", 0)
     if not main_id:
-        return False           # ID not cached yet — don't block
+        return False           # main bot ID not cached yet — don't block clones
 
     try:
         from pyrogram import enums as _enums
-        member = await clone_client.get_chat_member(chat_id, main_id)
+        # Use the MAIN APP's client — it can always check its own status
+        member = await _cfg.app.get_chat_member(chat_id, main_id)
         present = member.status not in (
             _enums.ChatMemberStatus.LEFT,
             _enums.ChatMemberStatus.BANNED,
         )
     except Exception:
-        present = False        # Can't check → assume not present (safe fallback)
+        # UserNotParticipant, ChatForbidden, etc. → main bot is NOT in the chat
+        present = False
 
     _main_bot_presence[chat_id] = present
+    if present:
+        _main_bot_groups.add(chat_id)
     return present
 
 
@@ -161,24 +199,27 @@ async def stop_clone(token: str) -> bool:
 
 @app.on_chat_member_updated()
 async def _main_bot_group_membership_changed(client: Client, update):
-    """When the main bot's own membership in a group changes, clear the
-    presence cache for that group so clone bots re-check on next message.
+    """When the main bot's own membership changes, update the presence tracking
+    so clone bots immediately respect / stop respecting the priority guard.
     """
     import config as _cfg
+    from pyrogram import enums as _enums
     main_id = getattr(_cfg, "MAIN_BOT_ID", 0)
     if not main_id:
         return
     new = update.new_chat_member
-    if new and new.user and new.user.id == main_id:
-        chat_id = update.chat.id if update.chat else None
-        if chat_id:
-            invalidate_presence_cache(chat_id)
-            from pyrogram import enums as _enums
-            status = new.status
-            state  = "joined" if status not in (
-                _enums.ChatMemberStatus.LEFT, _enums.ChatMemberStatus.BANNED
-            ) else "left/banned"
-            print(f"[CLONE_GUARD] Main bot {state} group {chat_id} — cache cleared")
+    if not (new and new.user and new.user.id == main_id):
+        return
+    chat_id = update.chat.id if update.chat else None
+    if not chat_id:
+        return
+    is_left = new.status in (_enums.ChatMemberStatus.LEFT, _enums.ChatMemberStatus.BANNED)
+    if is_left:
+        main_bot_mark_left(chat_id)
+        print(f"[CLONE_GUARD] Main bot left/banned group {chat_id} — clone bots now active")
+    else:
+        main_bot_mark_active_in(chat_id)
+        print(f"[CLONE_GUARD] Main bot joined group {chat_id} — clone bots silenced")
 
 
 async def start_all_clones():
