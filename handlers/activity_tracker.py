@@ -16,10 +16,12 @@ Setup:
   4. Optionally disable specific groups: /trackchats off (inside that group)
 """
 import asyncio
+import time
 from datetime import datetime
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.errors import FloodWait
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import app, HTML, settings_col, clones_col, groups_col, ADMIN_ID
 from helpers import _is_admin_msg, _auto_del, get_cfg, _clone_config_ctx
@@ -28,6 +30,13 @@ from helpers import _is_admin_msg, _auto_del, get_cfg, _clone_config_ctx
 # ── MongoDB collections ────────────────────────────────────────────────────────
 _monitor_col   = None   # chat_monitor_msgs — header/copied IDs → user_id
 _tracking_col  = None   # chat_monitor_settings — per-group enabled flag
+
+# ── Forward dedup — prevents both main+clone bot forwarding the same message ──
+# Key = (chat_id, msg_id), value = float timestamp. Cleaned every 60 s.
+_fwd_dedup: dict[tuple, float] = {}
+
+# ── Group DM sessions ─────────────────────────────────────────────────────────
+_groupdm_sessions: dict[int, dict] = {}  # admin_id → session
 
 
 def _mon_col():
@@ -288,7 +297,7 @@ _CONTENT_FILTER = (
 
 @app.on_message(
     filters.group & ~filters.service & _CONTENT_FILTER,
-    group=8,
+    group=-5,           # runs BEFORE clone_guard (group=-4) — both main+clone can fire
 )
 async def forward_to_monitor(client: Client, message: Message):
     if not message.from_user:
@@ -302,30 +311,34 @@ async def forward_to_monitor(client: Client, message: Message):
     if not monitor_id:
         return
 
-    # Don't monitor the monitor group itself
     if message.chat.id == monitor_id:
         return
 
-    # Per-group toggle check
     if not await _is_tracking_enabled(message.chat.id):
         return
 
-    user  = message.from_user
-    uid   = user.id
-    uname = f"@{user.username}" if user.username else "—"
-    name  = user.first_name or "User"
-    chat  = message.chat.title or str(message.chat.id)
+    # ── Dedup: if the same (chat, msg) was already forwarded (by the other bot),
+    # skip. This prevents duplicate forwards when both main + clone are in the group.
+    key = (message.chat.id, message.id)
+    now = time.monotonic()
 
-    header = (
-        f"💬 <b>Group Message</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 {_link(user)}  <code>{uid}</code>\n"
-        f"🔖 {uname}\n"
-        f"📍 {chat}\n"
-        f"🕒 {_now()}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>↩️ Reply here to DM this user</i>"
-    )
+    # Clean stale entries > 60 s old
+    stale = [k for k, t in _fwd_dedup.items() if now - t > 60]
+    for k in stale:
+        _fwd_dedup.pop(k, None)
+
+    if key in _fwd_dedup:
+        return   # Already forwarded by the other bot instance
+    _fwd_dedup[key] = now   # Claim this forward (atomic in asyncio single-thread)
+
+    user       = message.from_user
+    uid        = user.id
+    name       = user.first_name or "User"
+    group_id   = message.chat.id
+    group_title = message.chat.title or str(group_id)
+
+    # ── Minimal header: just the group name, no user info ─────────────────────
+    header = f"📍 <b>{group_title}</b>"
 
     try:
         header_msg = await client.send_message(monitor_id, header, parse_mode=HTML)
@@ -339,14 +352,14 @@ async def forward_to_monitor(client: Client, message: Message):
             "copied_msg_id": copied.id if copied else None,
             "user_id":       uid,
             "user_name":     name,
-            "group_title":   chat,
-            "group_id":      message.chat.id,
+            "group_title":   group_title,
+            "group_id":      group_id,
             "monitor_id":    monitor_id,
             "created_at":    datetime.utcnow(),
         })
-        print(f"[MONITOR] {uid} in '{chat}' → monitor {monitor_id}")
     except Exception as exc:
-        print(f"[MONITOR] Forward failed from {message.chat.id}: {exc}")
+        _fwd_dedup.pop(key, None)   # Release claim so the other bot can retry
+        print(f"[MONITOR] Forward failed from {group_id}: {exc}")
 
 
 # ── Admin replies in Monitor Group → DM original user ────────────────────────
@@ -403,6 +416,192 @@ async def monitor_reply_handler(client: Client, message: Message):
         )
         asyncio.create_task(_auto_del(err, 20))
         print(f"[MONITOR] Reply DM failed: {exc}")
+
+
+# ── /groupdm — DM a message to ALL members of a selected group ───────────────
+#
+# Usage:
+#   /groupdm                  → shows group list (pick with buttons)
+#   /groupdm -1001234567890   → jump straight to message step
+#
+# After picking the group, send the message/photo/video.
+# Bot DMs every member and reports sent/failed count.
+
+@app.on_message(filters.command("groupdm") & filters.private, group=-3)
+async def groupdm_start(client: Client, message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    args = message.command[1:]
+
+    if args and args[0].lstrip("-").isdigit():
+        gid = int(args[0])
+        try:
+            chat = await client.get_chat(gid)
+            title = chat.title or str(gid)
+        except Exception:
+            await message.reply_text(
+                "❌ Cannot access that group. Make sure the bot is in it.",
+                parse_mode=HTML,
+            )
+            return
+        _groupdm_sessions[ADMIN_ID] = {
+            "step":  "content",
+            "gid":   gid,
+            "title": title,
+        }
+        await message.reply_text(
+            f"📤 <b>Group DM</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Target: <b>{title}</b>  <code>{gid}</code>\n\n"
+            f"Send the message (text/photo/video/sticker) to broadcast.\n"
+            f"/cancel to abort.",
+            parse_mode=HTML,
+        )
+        return
+
+    # Show group list as buttons
+    docs = await groups_col.find({}).sort("title", 1).to_list(length=50)
+    if not docs:
+        await message.reply_text("📭 No groups in DB yet.", parse_mode=HTML)
+        return
+
+    buttons = []
+    for d in docs[:24]:
+        cid   = d.get("chat_id")
+        label = (d.get("title") or str(cid))[:30]
+        buttons.append([InlineKeyboardButton(label, callback_data=f"gdm:{cid}")])
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="gdm:cancel")])
+
+    _groupdm_sessions[ADMIN_ID] = {"step": "pick"}
+    await message.reply_text(
+        "📤 <b>Group DM</b>\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        "Select the group to DM all members:",
+        parse_mode=HTML,
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+@app.on_callback_query(filters.regex(r"^gdm:"))
+async def groupdm_pick_cb(client: Client, cq):
+    if cq.from_user.id != ADMIN_ID:
+        await cq.answer()
+        return
+
+    data = cq.data.split(":", 1)[1]
+    if data == "cancel":
+        _groupdm_sessions.pop(ADMIN_ID, None)
+        await cq.edit_message_text("❌ Cancelled.")
+        return
+
+    gid = int(data)
+    try:
+        chat  = await client.get_chat(gid)
+        title = chat.title or str(gid)
+    except Exception:
+        title = str(gid)
+
+    _groupdm_sessions[ADMIN_ID] = {
+        "step":  "content",
+        "gid":   gid,
+        "title": title,
+    }
+    await cq.edit_message_text(
+        f"📤 <b>Group DM</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Target: <b>{title}</b>  <code>{gid}</code>\n\n"
+        f"Send the message (text/photo/video/sticker) to broadcast.\n"
+        f"/cancel to abort.",
+        parse_mode=HTML,
+    )
+
+
+@app.on_message(filters.private, group=5)
+async def groupdm_content_handler(client: Client, message: Message):
+    """Capture admin's content message after groupdm target is set."""
+    if not message.from_user or message.from_user.id != ADMIN_ID:
+        return
+
+    session = _groupdm_sessions.get(ADMIN_ID)
+    if not session or session.get("step") != "content":
+        return
+
+    text_in = (message.text or "").strip()
+    if text_in == "/cancel":
+        _groupdm_sessions.pop(ADMIN_ID, None)
+        await message.reply_text("❌ Group DM cancelled.", parse_mode=HTML)
+        return
+
+    gid   = session["gid"]
+    title = session["title"]
+    _groupdm_sessions.pop(ADMIN_ID, None)
+
+    status_msg = await message.reply_text(
+        f"⏳ Fetching members of <b>{title}</b>…",
+        parse_mode=HTML,
+    )
+
+    sent   = 0
+    failed = 0
+    total  = 0
+    src_chat = message.chat.id
+    src_mid  = message.id
+
+    try:
+        async for member in client.get_chat_members(gid):
+            user = member.user
+            if user.is_bot or user.is_deleted:
+                continue
+            total += 1
+            try:
+                await client.copy_message(
+                    chat_id=user.id,
+                    from_chat_id=src_chat,
+                    message_id=src_mid,
+                )
+                sent += 1
+            except FloodWait as fw:
+                await asyncio.sleep(fw.value + 1)
+                try:
+                    await client.copy_message(
+                        chat_id=user.id,
+                        from_chat_id=src_chat,
+                        message_id=src_mid,
+                    )
+                    sent += 1
+                except Exception:
+                    failed += 1
+            except Exception:
+                failed += 1
+
+            # Progress update every 50 members
+            if total % 50 == 0:
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ Sending… {sent}/{total} done, {failed} failed",
+                        parse_mode=HTML,
+                    )
+                except Exception:
+                    pass
+            await asyncio.sleep(0.05)
+
+    except Exception as exc:
+        await status_msg.edit_text(
+            f"❌ Error fetching members: <code>{exc}</code>",
+            parse_mode=HTML,
+        )
+        return
+
+    await status_msg.edit_text(
+        f"✅ <b>Group DM Complete!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 Group: <b>{title}</b>\n"
+        f"👥 Total Members: <b>{total}</b>\n"
+        f"📤 Sent: <b>{sent}</b>\n"
+        f"❌ Failed: <b>{failed}</b>",
+        parse_mode=HTML,
+    )
+    print(f"[GROUPDM] {title} ({gid}) → sent={sent} failed={failed}")
 
 
 # ── /groupstats — detailed stats of all groups the bot is in ──────────────────
