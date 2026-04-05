@@ -29,13 +29,21 @@ async def mute_cmd(client: Client, message: Message):
     else:
         secs, label = None, "permanent"
 
+    # until_date=None crashes Pyrogram (tries to call None.to_bytes()).
+    # Omit the argument entirely for permanent mutes — Pyrogram defaults to 0 (forever).
     until_date = (datetime.utcnow() + timedelta(seconds=secs)) if secs else None
     try:
-        await client.restrict_chat_member(
-            message.chat.id, user_id,
-            ChatPermissions(can_send_messages=False),
-            until_date=until_date,
-        )
+        if until_date:
+            await client.restrict_chat_member(
+                message.chat.id, user_id,
+                ChatPermissions(can_send_messages=False),
+                until_date=until_date,
+            )
+        else:
+            await client.restrict_chat_member(
+                message.chat.id, user_id,
+                ChatPermissions(can_send_messages=False),
+            )
     except Exception as e:
         m = await message.reply_text(f"❌ Could not mute: {e}")
         asyncio.create_task(_auto_del(m, 15))
@@ -319,20 +327,24 @@ async def ro_cmd(client: Client, message: Message):
         secs, label = 3600, "1h"
 
     until_date = (datetime.utcnow() + timedelta(seconds=secs)) if secs else None
+    _ro_perms  = ChatPermissions(
+        can_send_messages        = False,
+        can_send_media_messages  = False,
+        can_send_polls           = False,
+        can_add_web_page_previews= False,
+        can_change_info          = False,
+        can_invite_users         = False,
+        can_pin_messages         = False,
+    )
     try:
-        await client.restrict_chat_member(
-            message.chat.id, user_id,
-            ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_polls=False,
-                can_add_web_page_previews=False,
-                can_change_info=False,
-                can_invite_users=False,
-                can_pin_messages=False,
-            ),
-            until_date=until_date,
-        )
+        if until_date:
+            await client.restrict_chat_member(
+                message.chat.id, user_id, _ro_perms, until_date=until_date,
+            )
+        else:
+            await client.restrict_chat_member(
+                message.chat.id, user_id, _ro_perms,
+            )
     except Exception as e:
         m = await message.reply_text(f"❌ Could not restrict: {e}")
         asyncio.create_task(_auto_del(m, 15))
