@@ -1,12 +1,24 @@
 import os
 from datetime import datetime
+from dotenv import load_dotenv # যুক্ত করা হয়েছে
 from motor.motor_asyncio import AsyncIOMotorClient
 from pyrogram import Client, enums
 
+# .env ফাইল থেকে ডেটা লোড করার জন্য
+load_dotenv()
+
 HTML = enums.ParseMode.HTML
 
+# এনভায়রনমেন্ট ভেরিয়েবল থেকে ডেটা নেওয়া
+BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+MONGO_URI = os.environ["MONGO_URI"]
+ADMIN_ID = int(os.environ["ADMIN_ID"])
+API_ID = int(os.environ["TELEGRAM_API_ID"])
+API_HASH = os.environ["TELEGRAM_API_HASH"]
+VIDEO_CHANNEL = int(os.environ.get("VIDEO_CHANNEL", -1002623940581))
+
 mongo_client   = AsyncIOMotorClient(
-    os.environ["MONGO_URI"],
+    MONGO_URI, # ভেরিয়েবল দিয়ে রিপ্লেস করা হয়েছে
     serverSelectionTimeoutMS=8000,
     connectTimeoutMS=8000,
     socketTimeoutMS=10000,
@@ -31,12 +43,7 @@ del_queue_col       = db["video_del_queue"]
 admins_col          = db["bot_admins"]
 clones_col          = db["bot_clones"]
 
-API_ID    = int(os.environ["TELEGRAM_API_ID"])
-API_HASH  = os.environ["TELEGRAM_API_HASH"]
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-ADMIN_ID  = int(os.environ["ADMIN_ID"])
-
-VIDEO_CHANNEL     = -1002623940581
+# কনস্ট্যান্ট সেটআপ
 DAILY_VIDEO_LIMIT = 5
 VIDEO_REPEAT_DAYS = 7
 
