@@ -280,14 +280,67 @@ async def kick_cmd(client: Client, message: Message):
     ))
 
 
-# ─── /del ─────────────────────────────────────────────────────────────────────
+# ─── /del  &  /del all ────────────────────────────────────────────────────────
 
 @app.on_message(filters.command("del") & filters.group)
 async def del_cmd(client: Client, message: Message):
     if not await _is_admin_msg(client, message):
         return
 
+    args    = message.command[1:]
     replied = message.reply_to_message
+
+    # ── /del all — delete every message from the replied-to user ──────────────
+    if args and args[0].lower() == "all":
+        if not replied:
+            m = await message.reply_text(
+                "❌ Reply to a message from the user whose messages you want to delete.",
+            )
+            asyncio.create_task(_auto_del(m, 10))
+            return
+
+        target_user = replied.from_user
+        if not target_user:
+            m = await message.reply_text(
+                "❌ Cannot identify the user (anonymous or channel message)."
+            )
+            asyncio.create_task(_auto_del(m, 10))
+            return
+
+        uid   = target_user.id
+        fname = target_user.first_name or str(uid)
+
+        status_msg = await message.reply_text(
+            f"🗑️ Deleting all messages from {fname}…"
+        )
+        try:
+            from pyrogram.raw import functions as raw_fn
+            await client.invoke(
+                raw_fn.channels.DeleteParticipantHistory(
+                    channel     = await client.resolve_peer(message.chat.id),
+                    participant = await client.resolve_peer(uid),
+                )
+            )
+            await status_msg.edit_text(
+                f"✅ All messages from <b>{fname}</b> (<code>{uid}</code>) deleted.",
+                parse_mode=HTML,
+            )
+            asyncio.create_task(_auto_del(status_msg, 20))
+            asyncio.create_task(log_event(client,
+                f"🗑️ <b>Del All</b>  👤 {fname} <code>{uid}</code>"
+                f"  📍 {message.chat.title or message.chat.id}"
+            ))
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Could not delete all messages: {e}")
+            asyncio.create_task(_auto_del(status_msg, 15))
+
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    # ── /del — delete only the replied-to message ─────────────────────────────
     if not replied:
         m = await message.reply_text("❌ Reply to the message you want to delete.")
         asyncio.create_task(_auto_del(m, 10))
