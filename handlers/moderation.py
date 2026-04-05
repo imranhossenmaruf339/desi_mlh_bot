@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 import aiohttp
 from pyrogram import Client, filters
-from pyrogram.types import Message, ChatPermissions
+from pyrogram.types import Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import HTML, ADMIN_ID, users_col, app
 from helpers import (
@@ -24,6 +24,33 @@ from helpers import (
 _msg_cache: dict[int, dict[int, deque]] = defaultdict(
     lambda: defaultdict(lambda: deque(maxlen=1000))
 )
+
+# ── Channel promotional button (added to warnings and videos) ─────────────────
+COUPLE_BTN = InlineKeyboardMarkup([[
+    InlineKeyboardButton(
+        "🔵✓⃝𝐂𝐎𝐔𝐏𝐋𝐄✓⃝🔵",
+        url="https://t.me/+Rbj5D5wXoB4yMjE1",
+    )
+]])
+
+# ── Service-message filter ────────────────────────────────────────────────────
+_SVC = (
+    filters.new_chat_members
+    | filters.left_chat_member
+    | filters.new_chat_title
+    | filters.new_chat_photo
+    | filters.delete_chat_photo
+    | filters.pinned_message
+)
+
+
+@app.on_message(_SVC & filters.group, group=20)
+async def _delete_service_messages(client: Client, message: Message):
+    """Auto-delete every service message (join / leave / title / pin …)."""
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
 
 @app.on_message(filters.group, group=4)
@@ -240,6 +267,7 @@ async def warn_cmd(client: Client, message: Message):
         f"📋 Reason: {reason}"
         f"{auto_ban_note}",
         parse_mode=HTML,
+        reply_markup=COUPLE_BTN,
     )
     asyncio.create_task(_auto_del(m, 60))
     asyncio.create_task(log_event(client,
