@@ -305,21 +305,29 @@ _CONTENT_FILTER = (
     group=-5,           # runs BEFORE clone_guard (group=-4) — both main+clone can fire
 )
 async def forward_to_monitor(client: Client, message: Message):
-    if not message.from_user:
-        return
-    if message.from_user.is_bot:
-        return
-    if (message.text or message.caption or "").lstrip().startswith("/"):
-        return
+    """Forward group messages to monitor group for admin review."""
+    try:
+        if not message.from_user:
+            return
+        if message.from_user.is_bot:
+            return
+        if (message.text or message.caption or "").lstrip().startswith("/"):
+            return
 
-    monitor_id = await _get_monitor_group(client)
-    if not monitor_id:
-        return
+        monitor_id = await _get_monitor_group(client)
+        if not monitor_id:
+            # DEBUG: Monitor group not set yet
+            return
 
-    if message.chat.id == monitor_id:
-        return
+        if message.chat.id == monitor_id:
+            # Don't forward messages FROM the monitor group itself
+            return
 
-    if not await _is_tracking_enabled(message.chat.id):
+        if not await _is_tracking_enabled(message.chat.id):
+            # This group has tracking disabled
+            return
+    except Exception as e:
+        print(f"[MONITOR] Pre-check error: {e}")
         return
 
     # ── Dedup: if the same (chat, msg) was already forwarded (by the other bot),
@@ -357,7 +365,10 @@ async def forward_to_monitor(client: Client, message: Message):
             from_chat_id=message.chat.id,
             message_id=message.id,
         )
-        await _mon_col().insert_one({
+        
+        # Ensure monitor collection is initialized and insert entry
+        mon_col = _mon_col()
+        await mon_col.insert_one({
             "header_msg_id": header_msg.id,
             "copied_msg_id": copied.id if copied else None,
             "user_id":       uid,
@@ -367,9 +378,12 @@ async def forward_to_monitor(client: Client, message: Message):
             "monitor_id":    monitor_id,
             "created_at":    datetime.utcnow(),
         })
+        print(f"[MONITOR] ✅ Forwarded message from {group_title} (user: {uid})")
     except Exception as exc:
         _fwd_dedup.pop(key, None)   # Release claim so the other bot can retry
-        print(f"[MONITOR] Forward failed from {group_id}: {exc}")
+        print(f"[MONITOR] ❌ Forward failed from {group_id}: {exc}")
+        import traceback
+        traceback.print_exc()
 
 
 # ── "Reply in Group" button callback ─────────────────────────────────────────

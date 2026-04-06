@@ -228,6 +228,19 @@ async def _handle_bot_added(client: Client, chat, added_by=None):
     if can_invite:
         asyncio.create_task(_try_add_admin(client, chat.id))
 
+    # FIXED: Enable monitor tracking for new groups by default
+    from config import db
+    tracking_col = db["chat_monitor_settings"]
+    try:
+        await tracking_col.update_one(
+            {"chat_id": chat.id},
+            {"$set": {"enabled": True}},
+            upsert=True,
+        )
+        print(f"[GROUPS] Monitor tracking enabled for '{chat.title}' ({chat.id})")
+    except Exception as e:
+        print(f"[GROUPS] Could not enable tracking for {chat.id}: {e}")
+
     print(f"[GROUPS] Added to '{chat.title}' ({chat.id}) admin={bot_is_admin} invite={can_invite}")
 
 

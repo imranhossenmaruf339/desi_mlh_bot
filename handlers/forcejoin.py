@@ -180,7 +180,10 @@ async def get_not_joined(client: Client, user_id: int, channels: list) -> list:
             # None — bot cannot verify (not admin anywhere)
             print(f"[FJ] ⚠️ SETUP ISSUE: '{name}' ({cid}) — bot cannot check membership. "
                   "Ensure the bot is an ADMIN in this group/channel!")
-            # Don't add to not_joined — skip this check to avoid locking out users
+            # CRITICAL FIX: Add to not_joined so user is required to join.
+            # This prevents users from bypassing force-join when bot isn't admin.
+            not_joined.append(ch)
+            print(f"[FJ] User {user_id} will be required to join '{name}' due to bot permission issue.")
 
     return not_joined
 
