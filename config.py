@@ -42,6 +42,7 @@ groups_col          = db["bot_groups"]
 del_queue_col       = db["video_del_queue"]
 admins_col          = db["bot_admins"]
 clones_col          = db["bot_clones"]
+group_settings_col  = db["group_settings"]
 
 # কনস্ট্যান্ট সেটআপ
 DAILY_VIDEO_LIMIT = 5
