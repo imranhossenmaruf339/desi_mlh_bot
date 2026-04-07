@@ -103,10 +103,8 @@ async def get_group_members(client: Client, chat_id: int) -> List[ChatMember]:
 def _create_invisible_mention(user_id: int, name: str = None) -> str:
     """
     Create an invisible mention using ZWNJ character.
-    Format: [ZWNJ]@username or [text with hidden link]
+    The link text is always ZWNJ so the mention is invisible in chat.
     """
-    if name:
-        return f"<a href='tg://user?id={user_id}'>{ZWNJ}</a>"
     return f"<a href='tg://user?id={user_id}'>{ZWNJ}</a>"
 
 
