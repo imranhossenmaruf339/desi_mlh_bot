@@ -156,6 +156,25 @@ async def save_user(user) -> bool:
     return True
 
 
+async def get_custom_buttons(chat_id: int) -> InlineKeyboardMarkup | None:
+    """Get custom buttons configured for a group."""
+    from config import group_settings_col
+    doc = await group_settings_col.find_one({"chat_id": chat_id})
+    if not doc or not doc.get("custom_buttons"):
+        return None
+
+    buttons = doc["custom_buttons"]
+    if not buttons:
+        return None
+
+    # Create inline keyboard
+    keyboard = []
+    for btn in buttons:
+        keyboard.append([InlineKeyboardButton(btn["text"], url=btn["url"])])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 def parse_date(text: str):
     for fmt in ("%d.%m.%Y %H:%M", "%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M %p"):
         try:

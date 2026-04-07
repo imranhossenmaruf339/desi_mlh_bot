@@ -8,7 +8,7 @@ from pyrogram.types import Message, CallbackQuery
 from config import (
     HTML, ADMIN_ID, REPLIES,
     broadcast_sessions, fj_sessions,
-    scheduled_col, settings_col, users_col,
+    scheduled_col, settings_col, users_col, group_settings_col,
     STATE_CONTENT, STATE_BUTTONS, STATE_JOIN_DATE, STATE_CUSTOMIZE, STATE_SCHEDULE,
     app,
 )
@@ -29,6 +29,14 @@ async def join_request_handler(client: Client, request):
     group_name = chat.title or "the group"
     bot_uname  = await get_bot_username(client)
 
+    # Check if auto approve is enabled for this group
+    doc = await group_settings_col.find_one({"chat_id": chat_id})
+    auto_approve = doc.get("auto_approve", True) if doc else True  # Default to True for backward compatibility
+
+    if not auto_approve:
+        print(f"[JOIN] Auto approve disabled for {chat_id}, skipping")
+        return
+
     print(f"[JOIN] Request from user_id={user_id} ({first_name}) in chat_id={chat_id} ({group_name})")
 
     approve_result = await bot_api("approveChatJoinRequest", {
@@ -44,6 +52,36 @@ async def join_request_handler(client: Client, request):
         except Exception as e:
             print(f"[JOIN] All approve methods failed: {e}")
             return
+
+    # Send confirmation to log chat if configured
+    if doc and doc.get("approve_log_chat"):
+        log_chat = doc["approve_log_chat"]
+        try:
+            await client.send_message(
+                log_chat,
+                f"✅ <b>Join Request Approved</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 User: <a href='tg://user?id={user_id}'>{first_name}</a>\n"
+                f"🆔 ID: <code>{user_id}</code>\n"
+                f"📌 Group: {group_name}\n"
+                f"🕛 Time: {datetime.utcnow().strftime('%d %b %Y %H:%M UTC')}",
+                parse_mode=HTML
+            )
+        except Exception as e:
+            print(f"[JOIN] Failed to send log: {e}")
+
+    # Send confirmation to user if configured
+    if doc and doc.get("approve_confirm_user", False):
+        try:
+            await client.send_message(
+                user_id,
+                f"✅ <b>Welcome!</b>\n\n"
+                f"Your join request for <b>{group_name}</b> has been approved.\n\n"
+                f"🎉 You can now join the group!",
+                parse_mode=HTML
+            )
+        except Exception as e:
+            print(f"[JOIN] Failed to send user confirmation: {e}")
 
     now       = datetime.utcnow()
     join_date = now.strftime("%d %b %Y")

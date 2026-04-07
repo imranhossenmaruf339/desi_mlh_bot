@@ -8,8 +8,8 @@ from pyrogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 
-from config import HTML, ADMIN_ID, groups_col, app
-from helpers import log_event, _auto_del, get_bot_username, admin_filter
+from config import HTML, ADMIN_ID, groups_col, group_settings_col, welcome_col, nightmode_col, antiflood_col, filters_col, app
+from helpers import log_event, _auto_del, get_bot_username, admin_filter, bot_api, get_custom_buttons
 
 _URL_ENTITY_TYPES = {MessageEntityType.URL, MessageEntityType.TEXT_LINK}
 
@@ -89,6 +89,25 @@ async def group_command_guard(client: Client, message: Message):
         u_id    = user.id if user else 0
         mention = f"<a href='tg://user?id={u_id}'>{u_name}</a>"
 
+        # Default buttons
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🎬 Get Video Now",
+                    url=f"https://t.me/{bot_username}?start=video",
+                ),
+                InlineKeyboardButton(
+                    "🔵⃝𝐂𝐎𝐔𝐏𝐋𝐄⃝🔵",
+                    url="https://t.me/+PnUkO8waIEcyNDY1",
+                ),
+            ]
+        ]
+
+        # Add custom buttons if configured
+        custom_kb = await get_custom_buttons(message.chat.id)
+        if custom_kb:
+            keyboard.extend(custom_kb.inline_keyboard)
+
         # ── Send BIG reply BEFORE deleting the command ────────────────────
         m = await client.send_message(
             message.chat.id,
@@ -108,18 +127,7 @@ async def group_command_guard(client: Client, message: Message):
             f"💎 <b>Upgrade for more daily videos!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👇 <b>Tap a button below to proceed:</b>",
-            reply_markup=InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton(
-                        "🎬 Get Video Now",
-                        url=f"https://t.me/{bot_username}?start=video",
-                    ),
-                    InlineKeyboardButton(
-                        "🔵⃝𝐂𝐎𝐔𝐏𝐋𝐄⃝🔵",
-                        url="https://t.me/+PnUkO8waIEcyNDY1",
-                    ),
-                ],
-            ]),
+            reply_markup=InlineKeyboardMarkup(keyboard),
             reply_to_message_id=message.id,
             parse_mode=HTML,
         )
@@ -321,3 +329,518 @@ async def groups_cmd(client: Client, message: Message):
         lines.append(f"• <b>{title}</b>\n  <code>{cid}</code>  —  {status}")
 
     await message.reply_text("\n".join(lines), parse_mode=HTML)
+
+
+# ── Group settings command: /group ────────────────────────────────────────────
+
+@app.on_message(filters.command("group") & filters.group)
+async def group_settings_cmd(client: Client, message: Message):
+    if not await _is_privileged(client, message.chat.id, message.from_user.id):
+        return
+
+    args = message.command[1:]
+    chat_id = message.chat.id
+
+    # Get current settings
+    doc = await group_settings_col.find_one({"chat_id": chat_id}) or {}
+
+    if not args:
+        # Show current settings and menu
+        # Check actual status from respective collections
+        welcome_doc = await welcome_col.find_one({"chat_id": chat_id})
+        welcome_enabled = welcome_doc.get("enabled", False) if welcome_doc else False
+
+        nightmode_doc = await nightmode_col.find_one({"chat_id": chat_id})
+        nightmode_enabled = nightmode_doc.get("enabled", False) if nightmode_doc else False
+
+        antiflood_doc = await antiflood_col.find_one({"chat_id": chat_id})
+        antiflood_enabled = antiflood_doc.get("enabled", False) if antiflood_doc else False
+
+        filters_doc = await filters_col.find_one({"chat_id": chat_id})
+        filters_enabled = filters_doc.get("enabled", False) if filters_doc else False
+
+        # Group settings features
+        video_enabled = doc.get("video", True)  # Default to True
+        auto_reaction_enabled = doc.get("auto_reaction", False)
+        auto_reply_enabled = doc.get("auto_reply", False)
+        auto_approve_enabled = doc.get("auto_approve", True)  # Default to True
+
+        features = {
+            "video": ("🎬 Video Command", video_enabled),
+            "welcome": ("👋 Welcome Messages", welcome_enabled), 
+            "nightmode": ("🌙 Night Mode", nightmode_enabled),
+            "antiflood": ("🚫 Anti-Flood", antiflood_enabled),
+            "filters": ("🔍 Filters", filters_enabled),
+            "auto_reaction": ("😀 Auto Reactions", auto_reaction_enabled),
+            "auto_reply": ("💬 Auto Reply", auto_reply_enabled),
+            "auto_approve": ("✅ Auto Approve Joins", auto_approve_enabled)
+        }
+
+        status_lines = []
+        for key, (name, enabled) in features.items():
+            status = "✅ ON" if enabled else "❌ OFF"
+            status_lines.append(f"{name}: {status}")
+
+        text = (
+            f"⚙️ <b>Group Settings for {message.chat.title}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n" +
+            "\n".join(status_lines) + "\n\n" +
+            "Use buttons below to toggle features or configure:\n\n"
+            "<b>Quick Toggle:</b>\n"
+            "/group video on/off\n"
+            "/group welcome on/off\n"
+            "/group nightmode on/off\n"
+            "/group antiflood on/off\n"
+            "/group filters on/off\n\n"
+            "<b>Advanced Setup:</b>\n"
+            "/group reaction [emojis] - Set auto reactions\n"
+            "/group reply add \"keyword\" \"response\"\n"
+            "/group reply remove \"keyword\"\n"
+            "/group buttons add \"text\" \"url\"\n"
+            "/group approve on/off [log_chat_id]"
+        )
+
+        keyboard = [
+            [
+                InlineKeyboardButton("🎬 Video", callback_data=f"group_toggle_video_{chat_id}"),
+                InlineKeyboardButton("👋 Welcome", callback_data=f"group_toggle_welcome_{chat_id}"),
+            ],
+            [
+                InlineKeyboardButton("🌙 Night Mode", callback_data=f"group_toggle_nightmode_{chat_id}"),
+                InlineKeyboardButton("🚫 Anti-Flood", callback_data=f"group_toggle_antiflood_{chat_id}"),
+            ],
+            [
+                InlineKeyboardButton("🔍 Filters", callback_data=f"group_toggle_filters_{chat_id}"),
+                InlineKeyboardButton("😀 Reactions", callback_data=f"group_toggle_auto_reaction_{chat_id}"),
+            ],
+            [
+                InlineKeyboardButton("💬 Auto Reply", callback_data=f"group_setup_auto_reply_{chat_id}"),
+                InlineKeyboardButton("✅ Auto Approve", callback_data=f"group_toggle_auto_approve_{chat_id}"),
+            ],
+            [
+                InlineKeyboardButton("🔘 Custom Buttons", callback_data=f"group_setup_buttons_{chat_id}"),
+            ]
+        ]
+
+        await message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=HTML)
+        return
+
+    sub_cmd = args[0].lower()
+
+    if sub_cmd in ["video", "auto_reaction", "auto_reply", "auto_approve"]:
+        # These are stored in group_settings_col
+        if len(args) < 2:
+            current = "ON" if doc.get(sub_cmd, False) else "OFF"
+            await message.reply_text(f"Current {sub_cmd} status: {current}\n\nUsage: /group {sub_cmd} on/off", parse_mode=HTML)
+            return
+
+        state = args[1].lower()
+        if state not in ["on", "off"]:
+            await message.reply_text("Use 'on' or 'off'", parse_mode=HTML)
+            return
+
+        enabled = state == "on"
+        await group_settings_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {sub_cmd: enabled}},
+            upsert=True
+        )
+
+        status = "ENABLED" if enabled else "DISABLED"
+        await message.reply_text(f"✅ {sub_cmd.replace('_', ' ').title()} {status}", parse_mode=HTML)
+
+    elif sub_cmd == "welcome":
+        if len(args) < 2:
+            welcome_doc = await welcome_col.find_one({"chat_id": chat_id})
+            current = "ON" if (welcome_doc and welcome_doc.get("enabled", False)) else "OFF"
+            await message.reply_text(f"Current welcome status: {current}\n\nUsage: /group welcome on/off", parse_mode=HTML)
+            return
+
+        state = args[1].lower()
+        if state not in ["on", "off"]:
+            await message.reply_text("Use 'on' or 'off'", parse_mode=HTML)
+            return
+
+        enabled = state == "on"
+        await welcome_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"enabled": enabled}},
+            upsert=True
+        )
+
+        status = "ENABLED" if enabled else "DISABLED"
+        await message.reply_text(f"✅ Welcome Messages {status}", parse_mode=HTML)
+
+    elif sub_cmd == "nightmode":
+        if len(args) < 2:
+            nightmode_doc = await nightmode_col.find_one({"chat_id": chat_id})
+            current = "ON" if (nightmode_doc and nightmode_doc.get("enabled", False)) else "OFF"
+            await message.reply_text(f"Current nightmode status: {current}\n\nUsage: /group nightmode on/off", parse_mode=HTML)
+            return
+
+        state = args[1].lower()
+        if state not in ["on", "off"]:
+            await message.reply_text("Use 'on' or 'off'", parse_mode=HTML)
+            return
+
+        enabled = state == "on"
+        if enabled:
+            # Enable with default times if not set
+            await nightmode_col.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"enabled": True, "start_h": 23, "start_m": 0, "end_h": 6, "end_m": 0}},
+                upsert=True
+            )
+        else:
+            await nightmode_col.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"enabled": False}},
+                upsert=True
+            )
+
+        status = "ENABLED" if enabled else "DISABLED"
+        await message.reply_text(f"✅ Night Mode {status}", parse_mode=HTML)
+
+    elif sub_cmd == "antiflood":
+        if len(args) < 2:
+            antiflood_doc = await antiflood_col.find_one({"chat_id": chat_id})
+            current = "ON" if (antiflood_doc and antiflood_doc.get("enabled", False)) else "OFF"
+            await message.reply_text(f"Current antiflood status: {current}\n\nUsage: /group antiflood on/off", parse_mode=HTML)
+            return
+
+        state = args[1].lower()
+        if state not in ["on", "off"]:
+            await message.reply_text("Use 'on' or 'off'", parse_mode=HTML)
+            return
+
+        enabled = state == "on"
+        await antiflood_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"enabled": enabled}},
+            upsert=True
+        )
+
+        status = "ENABLED" if enabled else "DISABLED"
+        await message.reply_text(f"✅ Anti-Flood {status}", parse_mode=HTML)
+
+    elif sub_cmd == "filters":
+        if len(args) < 2:
+            filters_doc = await filters_col.find_one({"chat_id": chat_id})
+            current = "ON" if (filters_doc and filters_doc.get("enabled", False)) else "OFF"
+            await message.reply_text(f"Current filters status: {current}\n\nUsage: /group filters on/off", parse_mode=HTML)
+            return
+
+        state = args[1].lower()
+        if state not in ["on", "off"]:
+            await message.reply_text("Use 'on' or 'off'", parse_mode=HTML)
+            return
+
+        enabled = state == "on"
+        await filters_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"enabled": enabled}},
+            upsert=True
+        )
+
+        status = "ENABLED" if enabled else "DISABLED"
+        await message.reply_text(f"✅ Filters {status}", parse_mode=HTML)
+
+    elif sub_cmd == "reaction":
+        if len(args) < 2:
+            current = doc.get("reaction_emojis", [])
+            await message.reply_text(f"Current reactions: {', '.join(current) if current else 'None'}\n\nUsage: /group reaction emoji1 emoji2 ...", parse_mode=HTML)
+            return
+
+        emojis = args[1:]
+        # Validate emojis (basic check)
+        valid_emojis = [e for e in emojis if len(e.strip()) > 0]
+        await group_settings_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"reaction_emojis": valid_emojis, "auto_reaction": True}},
+            upsert=True
+        )
+        await message.reply_text(f"✅ Auto reactions set to: {', '.join(valid_emojis)}", parse_mode=HTML)
+
+    elif sub_cmd == "reply":
+        if len(args) < 2:
+            await message.reply_text("Usage:\n/group reply add \"keyword\" \"response\"\n/group reply remove \"keyword\"", parse_mode=HTML)
+            return
+
+        action = args[1].lower()
+        if action == "add":
+            if len(args) < 4:
+                await message.reply_text("Usage: /group reply add \"keyword\" \"response\"", parse_mode=HTML)
+                return
+            keyword = args[2].strip('"')
+            response = args[3].strip('"')
+            replies = doc.get("auto_replies", {})
+            replies[keyword] = response
+            await group_settings_col.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"auto_replies": replies, "auto_reply": True}},
+                upsert=True
+            )
+            await message.reply_text(f"✅ Added auto reply for '{keyword}'", parse_mode=HTML)
+
+        elif action == "remove":
+            if len(args) < 3:
+                await message.reply_text("Usage: /group reply remove \"keyword\"", parse_mode=HTML)
+                return
+            keyword = args[2].strip('"')
+            replies = doc.get("auto_replies", {})
+            if keyword in replies:
+                del replies[keyword]
+                await group_settings_col.update_one(
+                    {"chat_id": chat_id},
+                    {"$set": {"auto_replies": replies}},
+                    upsert=True
+                )
+                await message.reply_text(f"✅ Removed auto reply for '{keyword}'", parse_mode=HTML)
+            else:
+                await message.reply_text(f"❌ Keyword '{keyword}' not found", parse_mode=HTML)
+
+    elif sub_cmd == "buttons":
+        if len(args) < 2:
+            current = doc.get("custom_buttons", [])
+            btn_text = "\n".join([f"• {btn['text']} → {btn['url']}" for btn in current]) if current else "None"
+            await message.reply_text(f"Current buttons:\n{btn_text}\n\nUsage:\n/group buttons add \"text\" \"url\"\n/group buttons remove \"text\"", parse_mode=HTML)
+            return
+
+        action = args[1].lower()
+        if action == "add":
+            if len(args) < 4:
+                await message.reply_text("Usage: /group buttons add \"text\" \"url\"", parse_mode=HTML)
+                return
+            text = args[2].strip('"')
+            url = args[3].strip('"')
+            buttons = doc.get("custom_buttons", [])
+            buttons.append({"text": text, "url": url})
+            await group_settings_col.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"custom_buttons": buttons}},
+                upsert=True
+            )
+            await message.reply_text(f"✅ Added button '{text}' → {url}", parse_mode=HTML)
+
+        elif action == "remove":
+            if len(args) < 3:
+                await message.reply_text("Usage: /group buttons remove \"text\"", parse_mode=HTML)
+                return
+            text = args[2].strip('"')
+            buttons = doc.get("custom_buttons", [])
+            new_buttons = [btn for btn in buttons if btn['text'] != text]
+            if len(new_buttons) < len(buttons):
+                await group_settings_col.update_one(
+                    {"chat_id": chat_id},
+                    {"$set": {"custom_buttons": new_buttons}},
+                    upsert=True
+                )
+                await message.reply_text(f"✅ Removed button '{text}'", parse_mode=HTML)
+            else:
+                await message.reply_text(f"❌ Button '{text}' not found", parse_mode=HTML)
+
+    elif sub_cmd == "approve":
+        if len(args) < 2:
+            current = "ON" if doc.get("auto_approve", False) else "OFF"
+            log_chat = doc.get("approve_log_chat", "")
+            await message.reply_text(f"Auto approve: {current}\nLog chat: {log_chat}\n\nUsage: /group approve on/off [log_chat_id]", parse_mode=HTML)
+            return
+
+        state = args[1].lower()
+        if state not in ["on", "off"]:
+            await message.reply_text("Use 'on' or 'off'", parse_mode=HTML)
+            return
+
+        enabled = state == "on"
+        update_data = {"auto_approve": enabled}
+        if len(args) > 2:
+            try:
+                log_chat = int(args[2])
+                update_data["approve_log_chat"] = log_chat
+            except ValueError:
+                await message.reply_text("Invalid log chat ID", parse_mode=HTML)
+                return
+
+        await group_settings_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": update_data},
+            upsert=True
+        )
+        status = "ENABLED" if enabled else "DISABLED"
+        await message.reply_text(f"✅ Auto approve {status}", parse_mode=HTML)
+
+    else:
+        await message.reply_text("Unknown subcommand. Use /group for help.", parse_mode=HTML)
+
+
+# ── Callback handlers for group settings ──────────────────────────────────────
+
+@app.on_callback_query(filters.regex(r"^group_toggle_(\w+)_(-?\d+)$"))
+async def group_toggle_callback(client: Client, cq: CallbackQuery):
+    import re
+    m = re.match(r"^group_toggle_(\w+)_(-?\d+)$", cq.data)
+    feature = m.group(1)
+    chat_id = int(m.group(2))
+
+    # Check if user is admin in that group
+    if not await _is_privileged(client, chat_id, cq.from_user.id):
+        await cq.answer("❌ Only group admins can change settings", show_alert=True)
+        return
+
+    # Handle different collections
+    if feature in ["video", "auto_reaction", "auto_reply", "auto_approve"]:
+        # These are in group_settings_col
+        doc = await group_settings_col.find_one({"chat_id": chat_id}) or {}
+        current = doc.get(feature, False)
+        new_state = not current
+        await group_settings_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {feature: new_state}},
+            upsert=True
+        )
+
+    elif feature == "welcome":
+        welcome_doc = await welcome_col.find_one({"chat_id": chat_id})
+        current = welcome_doc.get("enabled", False) if welcome_doc else False
+        new_state = not current
+        await welcome_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"enabled": new_state}},
+            upsert=True
+        )
+
+    elif feature == "nightmode":
+        nightmode_doc = await nightmode_col.find_one({"chat_id": chat_id})
+        current = nightmode_doc.get("enabled", False) if nightmode_doc else False
+        new_state = not current
+        if new_state:
+            # Enable with default times if not set
+            await nightmode_col.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"enabled": True, "start_h": 23, "start_m": 0, "end_h": 6, "end_m": 0}},
+                upsert=True
+            )
+        else:
+            await nightmode_col.update_one(
+                {"chat_id": chat_id},
+                {"$set": {"enabled": False}},
+                upsert=True
+            )
+
+    elif feature == "antiflood":
+        antiflood_doc = await antiflood_col.find_one({"chat_id": chat_id})
+        current = antiflood_doc.get("enabled", False) if antiflood_doc else False
+        new_state = not current
+        await antiflood_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"enabled": new_state}},
+            upsert=True
+        )
+
+    elif feature == "filters":
+        filters_doc = await filters_col.find_one({"chat_id": chat_id})
+        current = filters_doc.get("enabled", False) if filters_doc else False
+        new_state = not current
+        await filters_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"enabled": new_state}},
+            upsert=True
+        )
+
+    status = "ENABLED" if new_state else "DISABLED"
+    feature_name = feature.replace("_", " ").title()
+    await cq.answer(f"✅ {feature_name} {status}")
+
+    # Update the message
+    try:
+        await cq.message.edit_reply_markup(reply_markup=None)
+        await client.send_message(chat_id, f"✅ {feature_name} {status}")
+    except:
+        pass
+
+
+@app.on_callback_query(filters.regex(r"^group_setup_(\w+)_(-?\d+)$"))
+async def group_setup_callback(client: Client, cq: CallbackQuery):
+    import re
+    m = re.match(r"^group_setup_(\w+)_(-?\d+)$", cq.data)
+    feature = m.group(1)
+    chat_id = int(m.group(2))
+
+    if not await _is_privileged(client, chat_id, cq.from_user.id):
+        await cq.answer("❌ Only group admins can change settings", show_alert=True)
+        return
+
+    if feature == "auto_reply":
+        text = (
+            "💬 <b>Auto Reply Setup</b>\n\n"
+            "Add keyword-response pairs:\n"
+            "<code>/group reply add \"hello\" \"Hi there!\"</code>\n\n"
+            "Remove keywords:\n"
+            "<code>/group reply remove \"hello\"</code>\n\n"
+            "Current replies will be shown in /group"
+        )
+        await cq.message.edit_text(text, parse_mode=HTML)
+
+    elif feature == "buttons":
+        text = (
+            "🔘 <b>Custom Buttons Setup</b>\n\n"
+            "Add buttons to bot messages:\n"
+            "<code>/group buttons add \"Visit Site\" \"https://example.com\"</code>\n\n"
+            "Remove buttons:\n"
+            "<code>/group buttons remove \"Visit Site\"</code>\n\n"
+            "Current buttons will be shown in /group"
+        )
+        await cq.message.edit_text(text, parse_mode=HTML)
+
+
+# ── Auto reaction handler ─────────────────────────────────────────────────────
+
+@app.on_message(filters.group & filters.text, group=10)
+async def auto_reaction_handler(client: Client, message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    chat_id = message.chat.id
+    doc = await group_settings_col.find_one({"chat_id": chat_id})
+    if not doc or not doc.get("auto_reaction", False):
+        return
+
+    emojis = doc.get("reaction_emojis", [])
+    if not emojis:
+        return
+
+    # React with all configured emojis
+    try:
+        for emoji in emojis:
+            await client.send_reaction(chat_id, message.id, emoji)
+    except Exception as e:
+        print(f"[AUTO_REACTION] Failed in {chat_id}: {e}")
+
+
+# ── Auto reply handler ────────────────────────────────────────────────────────
+
+@app.on_message(filters.group & filters.text, group=11)
+async def auto_reply_handler(client: Client, message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    chat_id = message.chat.id
+    text = message.text.lower().strip()
+
+    doc = await group_settings_col.find_one({"chat_id": chat_id})
+    if not doc or not doc.get("auto_reply", False):
+        return
+
+    replies = doc.get("auto_replies", {})
+    for keyword, response in replies.items():
+        if keyword.lower() in text:
+            try:
+                await message.reply_text(response, parse_mode=HTML)
+            except Exception as e:
+                print(f"[AUTO_REPLY] Failed in {chat_id}: {e}")
+            break  # Only reply to first matching keyword
+
+
+# ── Enhanced join request handler ─────────────────────────────────────────────
+
+# (Moved to misc.py to avoid duplication)
