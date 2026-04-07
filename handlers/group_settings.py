@@ -13,7 +13,7 @@ from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ChatMemberUpdated, ChatMember
+    ChatMember
 )
 from pyrogram.enums import ChatMemberStatus
 
@@ -618,19 +618,14 @@ async def apply_auto_reactions(client: Client, message: Message):
 # ═════════════════════════ AUTO-APPROVE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ══════════════════════════════════════════════════════════════════════════════
 
-@app.on_chat_member_updated(group=25)
-async def handle_join_request(client: Client, update: ChatMemberUpdated):
-    """Handle join requests - approve if enabled."""
-    if not update.chat or not update.new_chat_member:
+@app.on_chat_join_request(group=25)
+async def handle_join_request(client: Client, request):
+    """Handle join requests - approve if auto_approve is enabled for this group."""
+    if not request.chat or not request.from_user:
         return
 
-    chat_id = update.chat.id
-    new_member = update.new_chat_member
-    user = new_member.user
-
-    # Check if this is a new join request
-    if str(new_member.status) != "ChatMemberStatus.RESTRICTED":
-        return
+    chat_id = request.chat.id
+    user = request.from_user
 
     settings = await get_group_settings(chat_id)
     if not settings.get("auto_approve", False):
@@ -654,7 +649,7 @@ async def handle_join_request(client: Client, update: ChatMemberUpdated):
             await client.send_message(
                 user.id,
                 f"✅ <b>Request Approved!</b>\n\n"
-                f"Your join request has been approved for <b>{update.chat.title}</b>.\n"
+                f"Your join request has been approved for <b>{request.chat.title}</b>.\n"
                 f"Welcome! 👋",
                 parse_mode=HTML,
             )
@@ -667,7 +662,7 @@ async def handle_join_request(client: Client, update: ChatMemberUpdated):
             f"✅ <b>Join Request Approved</b>\n"
             f"👤 {mention}\n"
             f"🆔 <code>{user.id}</code>\n"
-            f"📍 {update.chat.title or chat_id}"
+            f"📍 {request.chat.title or chat_id}"
         )
 
         print(f"[AUTO_APPROVE] Approved {user.id} in {chat_id}")
