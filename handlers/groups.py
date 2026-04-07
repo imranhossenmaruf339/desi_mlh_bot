@@ -811,8 +811,9 @@ async def auto_reaction_handler(client: Client, message: Message):
 
     # React with all configured emojis
     try:
-        for emoji in emojis:
-            await client.send_reaction(chat_id, message.id, emoji)
+        from pyrogram.types import ReactionTypeEmoji
+        reactions = [ReactionTypeEmoji(emoji=emoji) for emoji in emojis]
+        await client.set_reaction(chat_id, message.id, reactions)
     except Exception as e:
         print(f"[AUTO_REACTION] Failed in {chat_id}: {e}")
 
