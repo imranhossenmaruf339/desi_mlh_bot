@@ -25,7 +25,7 @@ Admins can toggle features on/off for their specific group.
 - `welcome` - Enable/disable welcome messages
 - `filters` - Enable/disable word filters
 - `antiflood` - Enable/disable flood protection
-- `nightmode` - Enable/disable nightmode
+- `nightmode` - EnaEnablesable nightmode
 - `auto_reactions` - Enable/disable auto-reactions
 - `keyword_reply` - Enable/disable keyword-based replies
 
@@ -474,6 +474,283 @@ Process other handlers normally
 - [ ] Test auto-reactions
 - [ ] Test auto-approve
 - [ ] Test admin commands
+
+---
+
+## 7. Invisible Tagall System 🏷️
+
+### Overview
+Admins can mention all group members invisibly using Zero-Width Non-Joiner (ZWNJ) characters. Messages appear clean without showing mentions, but all members are notified.
+
+### Database Collection
+- **Collection:** `tagall_sessions`
+- **Fields:**
+  ```
+  {
+    "session_id": "chat_id_admin_timestamp",
+    "chat_id": -1001234567890,
+    "admin_id": 123456789,
+    "admin_name": "Admin Name",
+    "members_count": 250,
+    "custom_msg": "Check pinned message!",
+    "created_at": "2024-01-15T10:30:00",
+    "status": "completed",
+    "tagged_count": 245,
+    "failed_count": 5
+  }
+  ```
+
+### Commands
+
+#### In Group
+```
+/tagall [message]      → Tag all members with optional message
+/stoptag or /cancel    → Stop ongoing tagging operation
+/taggingstatus         → View current tagging progress
+/taghelp               → Show tagging help
+```
+
+**Examples:**
+```
+/tagall
+/tagall Check out the announcement in pinned message!
+/tagall Important update from the admin
+```
+
+#### Super Admin Only (Private)
+```
+/tagconfig batchsize 5    → Set members per batch (default: 5)
+/tagconfig delay 1.5      → Set delay between batches in seconds
+/tagconfig retries 3      → Set max retries per batch
+/taghistory [limit]       → View tagging history
+```
+
+### How It Works
+
+1. **Admin Command**: Admin uses `/tagall` with optional message
+2. **Member Fetching**: Bot retrieves all non-bot group members
+3. **Batch Processing**: Members are split into configurable batches (default 5 per batch)
+4. **Invisible Mentions**: Each batch message contains:
+   - Optional custom message from admin
+   - Zero-Width Non-Joiner (ZWNJ) invisible mentions
+   - HTML hyperlink mentions for reliability
+5. **Notification**: Each mention sends a notification to members
+6. **Batch Delay**: Configurable delay between batches to avoid Telegram flood limits
+7. **Error Handling**: Failed mentions are retried up to 3 times (configurable)
+8. **Session Management**: All tagging sessions are logged and trackable
+
+### Key Features
+
+✅ **Invisible Mentions**
+- Uses ZWNJ character (U+200C) for invisible text
+- Hyperlink mentions for reliable notification
+- Messages appear clean without visible mention lists
+
+✅ **Batch Processing**
+- Splits members into small batches (default 5)
+- Prevents Telegram flood limits
+- Configurable batch size and delays
+- Progress tracking during tagging
+
+✅ **Custom Messages**
+- Include message text with the tagging
+- Example: `/tagall Don't forget the event tonight!`
+- HTML formatting supported
+
+✅ **Session Management**
+- Start/stop tagging operations
+- View tagging status in real-time
+- Cancel anytime with `/stoptag`
+- Full audit trail in MongoDB
+
+✅ **Error Handling**
+- Automatic retries (default 3 times)
+- Detailed error reporting
+- Graceful degradation on failures
+- Success rate calculation
+
+✅ **Admin Controls**
+- View all tagging sessions
+- Configure batch behavior
+- Monitor tagging history
+- Performance optimized
+
+### Configuration
+
+Default batch configuration:
+- **Batch Size**: 5 members per message
+- **Batch Delay**: 1.5 seconds between batches
+- **Max Retries**: 3 attempts per batch
+
+Change via super admin commands:
+```
+/tagconfig batchsize 10    # Larger batches = faster, higher risk
+/tagconfig delay 2.0       # Longer delay = safer, slower
+/tagconfig retries 5       # More retries = better reliability
+```
+
+### Permissions
+
+- ✅ **Group Admin Required**: Admin must be group admin
+- ✅ **Bot Admin Required**: Bot must be group admin
+- ✅ **Exclude Bots**: Only human members are tagged
+- ✅ **Protected**: Max 500 members per tagging session
+
+### Workflow Example
+
+**Step 1: Start Tagging**
+```
+Admin: /tagall Hey everyone! Check the pinned message!
+Bot:   🔄 Fetching group members...
+       👥 Found 150 members
+       🏷️ Starting tagging process
+```
+
+**Step 2: Progress Update**
+```
+Progress: 2/30
+Tagged: 10/150
+Failed: 0
+Status: Processing batch 2...
+```
+
+**Step 3: Completion**
+```
+✅ Tagging Complete
+Total Members: 150
+Tagged: 148
+Failed: 2
+Success Rate: 98.7%
+Took 30 batches
+```
+
+### Session Management
+
+**View Status**
+```
+/taggingstatus
+Status: 🔄 In Progress
+Admin: John
+Members: 250
+```
+
+**Stop Tagging**
+```
+/stoptag
+⏹️ Tagging Stopped
+Tagged: 45/250
+```
+
+**View History**
+```
+/taghistory 20
+1. Group: -1001234567890
+   Admin: John (148 tagged)
+   Success Rate: 98.7%
+   Date: 15 Jan 2024 10:30
+```
+
+### Performance Optimizations
+
+- ✅ Batch processing avoids Telegram API rate limits
+- ✅ Configurable delays prevent flood bans
+- ✅ Async/await for non-blocking operations
+- ✅ MongoDB indexing for fast queries
+- ✅ In-memory session tracking for speed
+- ✅ Supports 500+ member groups
+
+### Error Scenarios
+
+**Scenario 1: Bot Not Admin**
+```
+❌ Bot Permission Error
+Bot is not an admin in this group
+```
+
+**Solution**: Make bot a group admin
+
+**Scenario 2: Tagging Already Running**
+```
+⚠️ Tagging Already in Progress
+Use /stoptag to cancel
+```
+
+**Solution**: Wait or stop with `/stoptag`
+
+**Scenario 3: Failed Members**
+```
+Tagged: 148/150
+Failed: 2
+Success Rate: 98.7%
+```
+
+**Solution**: Rerun or increase retries
+
+### Invisible Mention Technology
+
+**ZWNJ Character (U+200C)**
+- Completely invisible in normal rendering
+- Used for inline spacing in Arabic text
+- Perfect for hidden mentions in Telegram
+- Combined with hyperlinks for reliability
+
+**Implementation**
+```
+Format: {ZWNJ}<a href='tg://user?id={UID}'>​</a>
+Result: Invisible but notifies user
+Visual: No visible text or mention list
+Effect: User gets notification in their feed
+```
+
+### Use Cases
+
+1. **Announcements**: `/tagall Important announcement!`
+2. **Events**: `/tagall Don't miss the event at 5 PM!`
+3. **Reminders**: `/tagall Reminder: Weekly meeting tonight`
+4. **Updates**: `/tagall System update completed`
+5. **Discussions**: `/tagall What's your opinion on this?`
+
+### Advantages Over Native Tagging
+
+| Feature | Native | Invisible Tag |
+|---------|--------|---------------|
+| Visual Spam | ❌ Yes | ✅ No |
+| Everyone Notified | ❌ No | ✅ Yes |
+| Custom Message | ❌ No | ✅ Yes |
+| Clean Message | ❌ No | ✅ Yes |
+| Controllable | ❌ No | ✅ Yes |
+
+### Database Schema for Tagging
+
+```javascript
+// tagall_sessions Collection
+{
+  "session_id": "unique_session_id",           // chat_admin_timestamp
+  "chat_id": -1001234567890,                  // Group ID
+  "admin_id": 123456789,                      // Admin user ID
+  "admin_name": "John",                       // Admin name
+  "members_count": 250,                       // Total members found
+  "custom_msg": "Check the announcement",     // Optional message
+  "created_at": ISODate("2024-01-15T10:30:00"),
+  "completed_at": ISODate("2024-01-15T10:35:00"),
+  "status": "completed",                      // active, completed, failed
+  "tagged_count": 245,                        // Successfully tagged
+  "failed_count": 5,                          // Failed to tag
+  "success_rate": 98.0                        // Percentage
+}
+```
+
+---
+
+## Files Modified (with Invisible Tagall)
+
+1. **config.py** - MongoDB collections (no changes for tagger)
+2. **handlers/group_settings.py** - Group settings (350+ lines)
+3. **handlers/groups.py** - Group management (16 lines)
+4. **handlers/admin.py** - Admin commands (150 lines)
+5. **handlers/tagger.py** - **NEW**: Invisible tagall system (500+ lines)
+6. **handlers/__init__.py** - Added tagger import
+7. **main.py** - Added tagger import
 
 ---
 

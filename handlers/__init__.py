@@ -22,4 +22,5 @@ from handlers import (
     autotag,
     activity_tracker,
     group_settings,
+    tagger,
 )

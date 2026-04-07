@@ -16,6 +16,7 @@ import handlers.welcome
 import handlers.misc
 import handlers.premium
 import handlers.group_settings
+import handlers.tagger
 
 from handlers.nightmode import nightmode_loop
 from handlers.misc import schedule_loop
