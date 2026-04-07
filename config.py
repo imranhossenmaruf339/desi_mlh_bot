@@ -48,6 +48,7 @@ keyword_triggers_col = db["keyword_triggers"]
 group_buttons_col   = db["group_buttons"]
 auto_approve_logs_col = db["auto_approve_logs"]
 join_requests_col   = db["join_requests"]
+tagger_logs_col     = db["tagger_logs"]
 
 # কনস্ট্যান্ট সেটআপ
 DAILY_VIDEO_LIMIT = 5
