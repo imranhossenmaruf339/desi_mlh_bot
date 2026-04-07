@@ -21,4 +21,5 @@ from handlers import (
     ai_reply,
     autotag,
     activity_tracker,
+    group_settings,
 )

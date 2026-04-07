@@ -83,6 +83,22 @@ async def group_command_guard(client: Client, message: Message):
     cmd = text.split()[0].lstrip("/").split("@")[0].lower()
 
     if cmd == "video":
+        # Check if video feature is enabled for this group
+        from handlers.group_settings import get_group_settings
+        settings = await get_group_settings(message.chat.id)
+        if not settings.get("features", {}).get("video", True):
+            m = await message.reply_text(
+                "❌ <b>Video feature is disabled in this group.</b>\n\n"
+                "Contact group admins to enable it.",
+                parse_mode=HTML,
+            )
+            asyncio.create_task(_auto_del(m, 30))
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            raise StopPropagation
+
         bot_username = await get_bot_username(client)
         user    = message.from_user
         u_name  = (user.first_name or "User") if user else "User"
