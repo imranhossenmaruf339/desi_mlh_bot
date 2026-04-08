@@ -4,7 +4,7 @@ from datetime import datetime
 from pyrogram import Client, filters, StopPropagation
 from pyrogram.enums import MessageEntityType, ChatMemberStatus
 from pyrogram.types import (
-    Message, ChatMemberUpdated,
+    Message, ChatMemberUpdated, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
 
