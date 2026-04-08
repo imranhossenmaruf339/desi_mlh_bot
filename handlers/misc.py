@@ -70,18 +70,42 @@ async def join_request_handler(client: Client, request):
         except Exception as e:
             print(f"[JOIN] Failed to send log: {e}")
 
-    # Send confirmation to user if configured
-    if doc and doc.get("approve_confirm_user", False):
-        try:
-            await client.send_message(
-                user_id,
-                f"✅ <b>Welcome!</b>\n\n"
-                f"Your join request for <b>{group_name}</b> has been approved.\n\n"
-                f"🎉 You can now join the group!",
-                parse_mode=HTML
-            )
-        except Exception as e:
-            print(f"[JOIN] Failed to send user confirmation: {e}")
+    # ── Always send a rich Welcome DM ────────────────────────────────────────
+    try:
+        dm_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🎬 ভিডিও পান",   "url": f"https://t.me/{bot_uname}?start=video"},
+                    {"text": "💰 পয়েন্ট চেক", "url": f"https://t.me/{bot_uname}?start=points"},
+                ],
+                [
+                    {"text": "👥 রেফার করুন",  "url": f"https://t.me/{bot_uname}?start=refer"},
+                    {"text": "📋 সাহায্য",      "url": f"https://t.me/{bot_uname}?start=help"},
+                ],
+            ]
+        }
+        dm_text = (
+            f"🎉 <b>স্বাগতম! আপনার Join Request অনুমোদিত হয়েছে।</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📌 গ্রুপ: <b>{group_name}</b>\n\n"
+            f"🤖 <b>বট ব্যবহার করুন:</b>\n"
+            f"  🎬 /video  — র‌্যান্ডম ভিডিও পান\n"
+            f"  💰 /points — আপনার পয়েন্ট দেখুন\n"
+            f"  📋 /help   — সব কমান্ড\n\n"
+            f"🔗 <b>আপনার Referral Link:</b>\n"
+            f"<code>https://t.me/{bot_uname}?start={user_id}</code>\n\n"
+            f"💡 বন্ধুদের Invite করুন — প্রতি Invite-এ <b>+১০ পয়েন্ট!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        await bot_api("sendMessage", {
+            "chat_id":      user_id,
+            "text":         dm_text,
+            "parse_mode":   "HTML",
+            "reply_markup": dm_markup,
+        })
+        print(f"[JOIN] Welcome DM sent to {user_id}")
+    except Exception as e:
+        print(f"[JOIN] Welcome DM failed: {e}")
 
     now       = datetime.utcnow()
     join_date = now.strftime("%d %b %Y")

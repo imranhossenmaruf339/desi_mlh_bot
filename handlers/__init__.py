@@ -18,9 +18,12 @@ from handlers import (
     admin_mgmt,
     clone,
     user_antispam,
-    ai_reply,
+    # ai_reply,     ← intentionally disabled
     autotag,
     activity_tracker,
     group_settings,
     tagger,
+    control_group,
+    protection,
+    keyword_reply,
 )
